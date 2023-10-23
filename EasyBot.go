@@ -462,6 +462,7 @@ var (
 		noSU           error
 		noConnect      error
 		needEcho       error
+		wrongType      error
 	}{
 		general:        errors.New("OCCURRED ERROR"),
 		noEcho:         errors.New("CANT GET ECHO"),
@@ -469,6 +470,7 @@ var (
 		noSU:           errors.New("AT LEAST ONE SU IS REQUIRED"),
 		noConnect:      errors.New("DID NOT CONNECT TO GO-CQHTTP"),
 		needEcho:       errors.New("API CALLING MUST BE WITH ECHO"),
+		wrongType:      errors.New("WRONG INPUT TYPE"),
 	}
 )
 
@@ -924,7 +926,10 @@ retryLoop:
 }
 
 func (bot *CQBot) initSelfInfo() {
+	callTime := time.Now()
 	selfID, selfNickName, err := bot.GetLoginInfo()
+	usedTime := time.Since(callTime)
+	bot.log.Debug("[EasyBot] 初始化用时: ", usedTime)
 	if err != nil {
 		bot.log.Fatal("[EasyBot] 初始化账号信息失败, err: ", err)
 	}
@@ -1447,7 +1452,7 @@ func (bot *CQBot) saveMsg(msg *CQMessage) {
 
 // @的人列表
 func (msg *CQMessage) collectAt() (atWho []int) {
-	matches := msg.RegexpMustCompile(`\[CQ:reply,id=(-?[0-9]*)]`) //回复也算@
+	matches := msg.RegexpFindAllStringSubmatch(`\[CQ:reply,id=(-?[0-9]*)]`) //回复也算@
 	if len(matches) > 0 {
 		replyid, _ := strconv.Atoi(matches[0][1])
 		switch msg.MessageType {
@@ -1465,7 +1470,7 @@ func (msg *CQMessage) collectAt() (atWho []int) {
 			msg.Bot.MTPMutex.Unlock()
 		}
 	}
-	matches = msg.RegexpMustCompile(`\[CQ:at,qq=(\d+)]`)
+	matches = msg.RegexpFindAllStringSubmatch(`\[CQ:at,qq=(\d+)]`)
 	if len(matches) > 0 {
 		for _, match := range matches {
 			atId, _ := strconv.Atoi(match[1])
@@ -1487,7 +1492,7 @@ func (msg *CQMessage) collectAt() (atWho []int) {
 // 具体化回复，go-cqhttp.extra-reply-data: true时不必要，但是开了那玩意又会导致回复带上原文又触发一遍机器人
 func (msg *CQMessage) entityReply() (message string) {
 	message = msg.GetRawMessageOrMessage()
-	match := msg.RegexpMustCompile(`\[CQ:reply,id=(-?[0-9]*)]`)
+	match := msg.RegexpFindAllStringSubmatch(`\[CQ:reply,id=(-?[0-9]*)]`)
 	if len(match) > 0 {
 		replyIdS := match[0][1]
 		replyId, _ := strconv.Atoi(replyIdS)
@@ -1550,6 +1555,9 @@ func (bot *CQBot) frMark(fr *CQNoticeFriendRecall) {
 	recalledMsg.Extra.Recalled = true
 	recalledMsg.Extra.OperatorID = fr.UserID
 	bot.MTPMutex.Lock()
+	if bot.MessageTablePrivate[fr.UserID] == nil {
+		bot.MessageTablePrivate[fr.UserID] = make(map[int]*CQMessage)
+	}
 	bot.MessageTablePrivate[fr.UserID][fr.MessageID] = recalledMsg
 	bot.MTPMutex.Unlock()
 }
@@ -1578,6 +1586,9 @@ func (bot *CQBot) grMark(gr *CQNoticeGroupRecall) {
 	recalledMsg.Extra.Recalled = true
 	recalledMsg.Extra.OperatorID = gr.OperatorID
 	bot.MTGMutex.Lock()
+	if bot.MessageTableGroup[gr.GroupID] == nil {
+		bot.MessageTableGroup[gr.GroupID] = make(map[int]*CQMessage)
+	}
 	bot.MessageTableGroup[gr.GroupID][gr.MessageID] = recalledMsg
 	bot.MTGMutex.Unlock()
 }
@@ -1812,6 +1823,66 @@ func (bot *CQBot) GetMsg(message_id int) (msg *CQMessage, err error) {
 	return
 }
 
+type downloadFile struct {
+	File string `json:"file"`
+}
+
+func toStringArrHeaders(origin map[string]string) (to []string) {
+	for k, v := range origin {
+		to = append(to, fmt.Sprint(k+"="+v))
+	}
+	return to
+}
+
+/*
+下载文件到gocq本地, 返回的路径可直接塞进CQ码里发送
+
+headers 可以为 []string 或 map[string]string
+
+(最终都会转为 json 数组)
+*/
+func (bot *CQBot) DownloadFile(url string, thread_count int, headers any) (path string, err error) {
+	switch v := headers.(type) {
+	case map[string]string:
+		headers = toStringArrHeaders(v)
+	case []string:
+	default:
+		return "", e.wrongType
+	}
+
+	action := "download_file"
+	echo := genEcho(action)
+	p := bot.newApiCalling(action, echo)
+
+	params := map[string]any{
+		"url":          url,
+		"thread_count": thread_count,
+		"headers":      headers,
+	}
+	p.Raw["params"] = params
+
+	resp, err := bot.CallApiAndListenEcho(p, echo)
+	if err != nil {
+		return "", err
+	}
+	respByte, err := json.Marshal(resp.Data)
+	if err != nil {
+		bot.log.Warn("[EasyBot] 序列化出错(json.Marshal(resp.Data)), err: ", err,
+			"\n    resp.Data: ", resp.Data,
+			"\n    Marshal by gson: ", gson.New(resp.Data).JSON("", ""))
+		return "", err
+	}
+	file := &downloadFile{}
+	err = json.Unmarshal(respByte, file)
+	if err != nil {
+		bot.log.Warn("[EasyBot] 反序列化出错(json.Unmarshal(respByte, msg)), err: ", err,
+			"\n    respByte: ", string(respByte),
+			"\n    Unmarshal by gson: ", gson.New(respByte).JSON("", ""))
+		return "", err
+	}
+	return file.File, nil
+}
+
 /*
 发送私聊消息
 
@@ -1912,7 +1983,19 @@ func (bot *CQBot) SendGroupMsgs(group_ids []int, message any, otherParams ...any
 }
 
 /*
-创建合并转发消息节点
+直接引用消息合并转发
+*/
+func NewMsgForwardNode(msgId any) CQForwardNode {
+	return CQForwardNode{
+		"type": "node",
+		"data": map[string]any{
+			"id": msgId,
+		},
+	}
+}
+
+/*
+创建自定义合并转发消息节点
 
 	type nodeData struct { //标准的gocq合并转发消息节点
 		name    string //消息发送者名字
@@ -1922,7 +2005,7 @@ func (bot *CQBot) SendGroupMsgs(group_ids []int, message any, otherParams ...any
 		seq     int64  //起始消息序号(为0时不上报)
 	}
 */
-func NewForwardNode(name string, uin int, content string, timestamp, seq int64) CQForwardNode {
+func NewCustomForwardNode(name string, uin int, content string, timestamp, seq int64) CQForwardNode {
 	if timestamp == 0 {
 		timestamp = time.Now().Unix()
 	}
@@ -1980,7 +2063,7 @@ func FastNewForwardMsg(name string, uin int, timestamp, seq int64, content ...st
 	}
 	for _, content_ := range content {
 		forwardMsg = AppendForwardMsg(forwardMsg,
-			NewForwardNode(name, uin, content_, timestamp, seq))
+			NewCustomForwardNode(name, uin, content_, timestamp, seq))
 	}
 	return forwardMsg
 }
@@ -2064,8 +2147,17 @@ func (ctx *CQMessage) GetRawMessageOrMessage() string {
 
 正则完全匹配
 */
-func (ctx *CQMessage) RegexpMustCompile(exp string) [][]string {
+func (ctx *CQMessage) RegexpFindAllStringSubmatch(exp string) [][]string {
 	return regexp.MustCompile(exp).FindAllStringSubmatch(ctx.GetRawMessageOrMessage(), -1)
+}
+
+/*
+	return regexp.MustCompile(exp).ReplaceAllString(ctx.GetRawMessageOrMessage(), replaceTo)
+
+正则完全匹配替换
+*/
+func (ctx *CQMessage) RegexpReplaceAll(exp, replaceTo string) string {
+	return regexp.MustCompile(exp).ReplaceAllString(ctx.GetRawMessageOrMessage(), replaceTo)
 }
 
 /*
@@ -2075,6 +2167,15 @@ func (ctx *CQMessage) RegexpMustCompile(exp string) [][]string {
 */
 func (ctx *CQMessage) StringsContains(substr string) bool {
 	return strings.Contains(ctx.GetRawMessageOrMessage(), substr)
+}
+
+/*
+	return strings.Replace(ctx.GetRawMessageOrMessage())
+
+字符串替换
+*/
+func (ctx *CQMessage) StringsReplace(replacer *strings.Replacer) string {
+	return replacer.Replace(ctx.GetRawMessageOrMessage())
 }
 
 // 匹配超级用户
@@ -2143,7 +2244,7 @@ func (ctx *CQMessage) IsToMe() bool {
 	}()
 
 	isAtMe := func() bool {
-		match := ctx.RegexpMustCompile(fmt.Sprintf(`\[CQ:at,qq=%d]`, ctx.Bot.selfID))
+		match := ctx.RegexpFindAllStringSubmatch(fmt.Sprintf(`\[CQ:at,qq=%d]`, ctx.Bot.selfID))
 		return len(match) > 0
 	}()
 
@@ -2196,7 +2297,7 @@ func (ctx *CQMessage) GetCardOrNickname() string {
 
 // 获取回复的消息
 func (ctx *CQMessage) GetReplyedMsg() (replyedMsg *CQMessage, err error) {
-	matches := ctx.RegexpMustCompile(`\[CQ:reply,id=(-?[0-9]*)]`)
+	matches := ctx.RegexpFindAllStringSubmatch(`\[CQ:reply,id=(-?[0-9]*)]`)
 	if len(matches) == 0 {
 		return nil, errors.New("NO REPLY MESSAGE")
 	}
@@ -2269,7 +2370,7 @@ func (f *formater) Reply(id int) string {
 	return fmt.Sprintf("[CQ:reply,id=%d]", id)
 }
 
-// 编码自定义回复至CQcode
+// 编码自定义回复至 CQcode
 func (f *formater) CustomReply(text string, qq int, timestamp int, seq int) string {
 	if text == "" {
 		text = "<内部错误：未指定自定义回复内容>"
@@ -2298,16 +2399,42 @@ func (f *formater) ImageLocal(path string) string {
 	return f.Image(data)
 }
 
-// 将音频数据以base64的方式编码至CQcode
+// 将图片数据以 base64 的方式编码至 CQcode
 func (f *formater) Image(data []byte) string {
 	imageB64 := base64.StdEncoding.EncodeToString(data)
 	return "[CQ:image,file=base64://" + imageB64 + "]"
 }
 
-/*
-读取文件并将音频数据以base64的方式编码至CQcode,
+// fmt.Sprintf("[CQ:video,file=%s]", path)
+func (f *formater) Video(path string) string {
+	return fmt.Sprintf("[CQ:video,file=%s,cover=/root/Miuzarte/go-cqhttp/data/0.00.jpeg]", path)
+}
 
-sendDirectly为true时: 不调用ffmpeg转换至amr
+/*
+将音频 base64 编码至 CQcode,
+
+sendDirectly 为 true 时: 不调用 ffmpeg 转换至 amr
+*/
+func (f *formater) VocalBase64(audioB64 string, sendDirectly bool) string {
+	if sendDirectly {
+		return "[CQ:record,file=base64://" + audioB64 + "]"
+	}
+
+	data, err := base64.StdEncoding.DecodeString(audioB64)
+	if err != nil {
+		return "<内部错误：转换amr时base64解码失败: " + err.Error() + ">"
+	}
+	amrData, err := f.utils.Ffmpeg2amr(data)
+	if err != nil {
+		return "<内部错误：调用ffmpeg转换amr失败: " + err.Error() + ">"
+	}
+	return "[CQ:record,file=base64://" + base64.StdEncoding.EncodeToString(amrData) + "]"
+}
+
+/*
+读取文件并将音频数据以 base64 的方式编码至 CQcode,
+
+sendDirectly 为 true 时: 不调用 ffmpeg 转换至 amr
 */
 func (f *formater) VocalLocal(path string, sendDirectly bool) string {
 	audioData, err := os.ReadFile(path)
@@ -2318,9 +2445,9 @@ func (f *formater) VocalLocal(path string, sendDirectly bool) string {
 }
 
 /*
-将音频数据以base64的方式编码至CQcode,
+将音频数据以 base64 的方式编码至 CQcode,
 
-sendDirectly为true时: 不调用ffmpeg转换至amr
+sendDirectly 为 true 时: 不调用 ffmpeg 转换至 amr
 */
 func (f *formater) Vocal(data []byte, sendDirectly bool) string {
 	if sendDirectly {
@@ -2334,7 +2461,7 @@ func (f *formater) Vocal(data []byte, sendDirectly bool) string {
 	return "[CQ:record,file=base64://" + base64.StdEncoding.EncodeToString(amrData) + "]"
 }
 
-// 调用path中的ffmpeg转换音频至amr格式
+// 调用 path 中的 ffmpeg 转换音频至 amr 格式
 func (u *utilsFunc) Ffmpeg2amr(wav []byte) (amr []byte, err error) {
 	cmd := exec.Command("ffmpeg", "-f", "wav", "-i", "pipe:0", "-ar", "8000", "-ac", "1", "-f", "amr", "pipe:1")
 	cmd.Stdin = strings.NewReader(string(wav))
