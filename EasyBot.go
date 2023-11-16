@@ -33,7 +33,7 @@ type CQBot struct {
 	superUsers []int //超级用户列表
 
 	NickName                    []string              //机器人别称(用于判断IsToMe)
-	StartTime                   int64                 //此次上线时间
+	StartTime                   time.Time             //此次上线时间
 	IsEnableOnlineNotification  bool                  //是否启用上线通知
 	IsEnableOfflineNotification bool                  //是否启用下线通知
 	RetryCount                  int                   //连接重试次数
@@ -48,9 +48,14 @@ type CQBot struct {
 	ApiCallTimeOut              time.Duration         //调用超时时间
 	ApiCallNotice               chan struct{}         //Api调用响应通知
 	ApiCallResp                 map[string]*CQApiResp //Api调用响应 echo:*CQApiResp
+	// ACRMutex                    sync.Mutex            //Api调用响应锁
 
 	blackList *blackList //屏蔽列表 不执行由其触发的消息回调
 
+	NickNameTable       map[int]string             //QQ昵称 UserID:NickName
+	NNTMutex            sync.Mutex                 //QQ昵称锁
+	CardNameTable       map[int]map[int]string     //群名片 UserID:GroupID:CardName
+	CNTMutex            sync.Mutex                 //群名片锁
 	MessageTablePrivate map[int]map[int]*CQMessage //私聊消息缓存 UserID:MessageID:*CQMessage
 	MTPMutex            sync.Mutex                 //私聊消息表锁
 	MessageTableGroup   map[int]map[int]*CQMessage //群聊消息缓存 GroupID:MessageID:*CQMessage
@@ -108,6 +113,10 @@ type CQRecv struct {
 
 type CQForwardMsg []CQForwardNode //可以直接用Send(Private/Group)ForwardMsg()发送的
 type CQForwardNode map[string]any //单个消息节点, 需要用NewForwardMsg() / AppendForwardMsg()包装成CQForwardMsg才能发送
+
+type CQCardMsg struct {
+	App string `json:"app"`
+}
 
 // 事件
 type CQEvent struct {
@@ -387,23 +396,13 @@ type CQMetaEventHeartbeat struct { //心跳包
 
 	//状态
 	Status struct {
-		AppInitialized bool `json:"app_initialized"` //程序是否初始化完毕
-		AppEnabled     bool `json:"app_enabled"`     //程序是否可用
-		PluginsGood    bool `json:"plugins_good"`    //插件正常(可能为null)
-		AppGOod        bool `json:"app_good"`        //程序正常
-		Online         bool `json:"online"`          //是否在线
-
-		//统计信息
-		Stat struct {
-			PacketReceived  int `json:"packet_received"`   //收包数
-			PacketSent      int `json:"packet_sent"`       //发包数
-			PacketLost      int `json:"packet_lost"`       //丢包数
-			MessageReceived int `json:"message_received"`  //消息接收数
-			MessageSent     int `json:"message_sent"`      //消息发送数
-			DisconnectTimes int `json:"disconnect_times"`  //连接断开次数
-			LostTimes       int `json:"lost_times"`        //连接丢失次数
-			LastMessageTime int `json:"last_message_time"` //最后一次消息时间
-		} `json:"stat"`
+		Online   bool   `json:"online"`
+		Good     bool   `json:"good"`
+		QQStatus string `json:"qq.status"`
+		Self     struct {
+			Platform string `json:"platform"`
+			UserID   int    `json:"user_id"`
+		} `json:"self"`
 	} `json:"status"`
 }
 type CQMetaEventLifecycle struct { //生命周期
@@ -530,6 +529,8 @@ func New() *CQBot {
 	bot.ApiCallResp = make(map[string]*CQApiResp)
 	bot.MessageTablePrivate = make(map[int]map[int]*CQMessage)
 	bot.MessageTableGroup = make(map[int]map[int]*CQMessage)
+	bot.NickNameTable = make(map[int]string)
+	bot.CardNameTable = make(map[int]map[int]string)
 	bot.Utils = &utilsFunc{
 		bot:    bot,
 		Format: &formater{},
@@ -548,8 +549,13 @@ func (bot *CQBot) SetWsUrl(url string) *CQBot {
 	return bot
 }
 
-// 获取自身Q号
+// 获取自身Q号_Shamrock
 func (bot *CQBot) GetSelfID() (selfID int) {
+	return bot.selfID
+}
+
+// 获取自身Q号
+func (bot *CQBot) GetSelfID_gocq() (selfID int) {
 	if bot.selfID != 0 {
 		return bot.selfID
 	}
@@ -610,7 +616,7 @@ func (bot *CQBot) RmNickName(names ...string) *CQBot {
 }
 
 // 获取机器人别称
-func (bot *CQBot) GetNickName() []string {
+func (bot *CQBot) GetBotNickName() []string {
 	return bot.NickName
 }
 
@@ -703,6 +709,23 @@ func (bot *CQBot) GetGroupBan() []int {
 	return bot.blackList.group
 }
 
+// 获取QQ昵称
+func (bot *CQBot) GetNickName(userId int) string {
+	bot.NNTMutex.Lock()
+	defer bot.NNTMutex.Unlock()
+	return bot.NickNameTable[userId]
+}
+
+// 获取群名片, 空时返回QQ昵称
+func (bot *CQBot) GetCardName(groupId, userId int) string {
+	bot.CNTMutex.Lock()
+	defer bot.CNTMutex.Unlock()
+	if cardName := bot.CardNameTable[userId][groupId]; cardName != "" {
+		return cardName
+	}
+	return bot.GetNickName(userId)
+}
+
 /*
 预料之外的断开, 触发的前提是收到了第一个心跳包
 
@@ -713,7 +736,7 @@ e.g.:
 	}
 
 	func() {
-		panic(errors.New("Unexpected Termination! "))
+		panic(errors.New("Unexpected Termination"))
 	}
 */
 func (bot *CQBot) OnTerminateUnexpectedly(f func()) *CQBot {
@@ -849,8 +872,8 @@ func (bot *CQBot) OnLifecycle(f func(*CQMetaEventLifecycle)) *CQBot {
 	return bot
 }
 
-func (bot *CQBot) GetRunningTime() int64 {
-	return time.Now().Unix() - bot.StartTime
+func (bot *CQBot) GetRunningTime() time.Duration {
+	return time.Since(bot.StartTime)
 }
 
 // 断开CQ连接
@@ -914,14 +937,14 @@ retryLoop:
 	}
 
 	bot.log.Info("[EasyBot] 建立ws连接成功")
-	bot.StartTime = time.Now().Unix()
+	bot.StartTime = time.Now()
 	bot.IsHeartbeatOK = true
 	bot.Conn = c
 	if bot.IsEnableOnlineNotification {
 		_ = bot.Log2SU.Info("[EasyBot] 已上线")
 	}
 	go bot.recvLoop()
-	bot.initSelfInfo()
+	// bot.initSelfInfo() //RIP go-cqhttp
 	return
 }
 
@@ -1440,6 +1463,10 @@ func (bot *CQBot) saveMsg(msg *CQMessage) {
 		}
 		bot.MessageTableGroup[msg.GroupID][msg.MessageID] = msg
 		bot.MTGMutex.Unlock()
+
+		bot.saveCardName(msg.Sender.GroupID, msg.Sender.UserID, msg.Sender.CardName)
+		bot.saveNickName(msg.Sender.UserID, msg.Sender.CardName)
+
 	case "private":
 		bot.MTPMutex.Lock()
 		if bot.MessageTablePrivate[msg.UserID] == nil {
@@ -1447,7 +1474,34 @@ func (bot *CQBot) saveMsg(msg *CQMessage) {
 		}
 		bot.MessageTablePrivate[msg.UserID][msg.MessageID] = msg
 		bot.MTPMutex.Unlock()
+
+		bot.saveNickName(msg.Sender.UserID, msg.Sender.CardName)
 	}
+}
+
+func (bot *CQBot) saveNickName(userId int, nickName string) {
+	bot.NNTMutex.Lock()
+	bot.NickNameTable[userId] = nickName
+	bot.NNTMutex.Unlock()
+}
+
+func (bot *CQBot) saveCardName(groupId, userId int, cardName string) {
+	bot.CNTMutex.Lock()
+	if bot.CardNameTable[userId] == nil {
+		bot.CardNameTable[userId] = make(map[int]string)
+	}
+	bot.CardNameTable[userId][groupId] = cardName
+	bot.CNTMutex.Unlock()
+}
+
+var rmCardReg = regexp.MustCompile(`^\[CQ:json,data=|\]$`)
+
+func (msg *CQMessage) ToCardMsg() (cardMsg *CQCardMsg, err error) {
+	s := unescape.Replace(msg.GetRawMessageOrMessage())
+	s = rmCardReg.ReplaceAllString(s, "")
+	cardMsg = &CQCardMsg{}
+	err = json.Unmarshal([]byte(s), cardMsg)
+	return
 }
 
 // @的人列表
@@ -1597,6 +1651,7 @@ func (bot *CQBot) grMark(gr *CQNoticeGroupRecall) {
 func (bot *CQBot) handleHeartbeat(hb *CQMetaEventHeartbeat) {
 	bot.IsHeartbeatOK = true
 	bot.HeartbeatInterval = hb.Interval
+	bot.selfID = hb.Status.Self.UserID
 	if !bot.IsHeartbeatChecking {
 		bot.HeartbeatWaitGroup.Done()
 	}
@@ -2143,6 +2198,15 @@ func (ctx *CQMessage) GetRawMessageOrMessage() string {
 }
 
 /*
+	return ctx.GetRawMessageOrMessage() == str
+
+字符串匹配
+*/
+func (ctx *CQMessage) StringsMatch(str string) bool {
+	return ctx.GetRawMessageOrMessage() == str
+}
+
+/*
 	return regexp.MustCompile(exp).FindAllStringSubmatch(ctx.GetRawMessageOrMessage(), -1)
 
 正则完全匹配
@@ -2387,7 +2451,16 @@ func (f *formater) CustomReply(text string, qq int, timestamp int, seq int) stri
 	return fmt.Sprintf("[CQ:reply,text=%s,qq=%d,time=%d]", text, qq, timestamp)
 }
 
-func (f *formater) ImageUrl(url string) string {
+// 将 base64 图片数据编码至 CQcode
+func (f *formater) ImageBase64(imageB64 string) string {
+	return "[CQ:image,file=base64://" + imageB64 + "]"
+}
+
+func (f *formater) ImageUrl(url string, params ...string) string {
+	param := ""
+	for _, p := range params {
+		param += p
+	}
 	return "[CQ:image,file=" + url + "]"
 }
 
