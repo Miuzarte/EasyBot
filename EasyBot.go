@@ -1,6 +1,8 @@
 package EasyBot
 
 import (
+	"EasyBot/SimpleLogFormatter"
+	"EasyBot/TimeLayout"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -15,42 +17,40 @@ import (
 	"time"
 
 	"github.com/sirupsen/logrus"
-	easy "github.com/t-tomalak/logrus-easy-formatter"
 	"github.com/ysmood/gson"
 	"golang.org/x/net/websocket"
 )
 
 type CQBot struct {
-	wsUrl string //WebSocket通信地址
-
-	Conn     *websocket.Conn //WebSocket连接 (允许直接操作ws连接)
+	WsUrl    string          //WebSocket通信地址
+	Conn     *websocket.Conn //WebSocket连接
 	ConnLost chan struct{}   //连接断开信号
 
 	IsExpectedTermination   bool   //是否为预期中的终止连接
 	OnUnexpectedTermination func() //预料之外的断开回调
 
-	selfID     int   //机器人账号
-	superUsers []int //超级用户列表
+	SelfID     int   //机器人账号
+	SuperUsers []int //超级用户列表
 
-	NickName                    []string              //机器人别称(用于判断IsToMe)
-	StartTime                   time.Time             //此次上线时间
-	IsEnableOnlineNotification  bool                  //是否启用上线通知
-	IsEnableOfflineNotification bool                  //是否启用下线通知
-	RetryCount                  int                   //连接重试次数
-	IsHeartbeatChecking         bool                  //是否存在心跳监听协程
-	IsHeartbeatOK               bool                  //是否正常接收到心跳包
-	HeartbeatCount              int                   //接收心跳包计数
-	HeartbeatLostCount          int                   //心跳包丢失计数
-	HeartbeatInterval           int                   //心跳包间隔(ms)
-	HeartbeatWaitGroup          sync.WaitGroup        //心跳包等待
-	Heartbeat                   chan struct{}         //心跳包接收传入通道
-	Wg                          sync.WaitGroup        //等待
-	ApiCallTimeOut              time.Duration         //调用超时时间
-	ApiCallNotice               chan struct{}         //Api调用响应通知
-	ApiCallResp                 map[string]*CQApiResp //Api调用响应 echo:*CQApiResp
+	NickName                    []string  //机器人别称(用于判断IsToMe)
+	StartTime                   time.Time //此次上线时间
+	IsEnableOnlineNotification  bool      //是否启用上线通知
+	IsEnableOfflineNotification bool      //是否启用下线通知
+	RetryCount                  int       //连接重试次数
+	IsHeartbeatChecking         bool      //是否存在心跳监听协程
+	IsHeartbeatOK               bool      //是否正常接收到心跳包
+	HeartbeatCount              int       //接收心跳包计数
+	HeartbeatLostCount          int       //心跳包丢失计数
+	HeartbeatInterval           int       //心跳包间隔(ms)
+	//HeartbeatWaitGroup          sync.WaitGroup        //心跳包等待
+	Heartbeat      chan struct{}         //心跳包接收传入通道
+	Wg             sync.WaitGroup        //等待
+	ApiCallTimeOut time.Duration         //调用超时时间
+	ApiCallNotice  chan struct{}         //Api调用响应通知
+	ApiCallResp    map[string]*CQApiResp //Api调用响应 echo:*CQApiResp
 	// ACRMutex                    sync.Mutex            //Api调用响应锁
 
-	blackList *blackList //屏蔽列表 不执行由其触发的消息回调
+	BlackList *blackList //屏蔽列表 不执行由其触发的消息回调
 
 	NickNameTable       map[int]string             //QQ昵称 UserID:NickName
 	NNTMutex            sync.Mutex                 //QQ昵称锁
@@ -118,7 +118,7 @@ type CQCardMsg struct {
 	App string `json:"app"`
 }
 
-// 事件
+// CQEvent 事件
 type CQEvent struct {
 	Bot  *CQBot
 	Recv *CQRecv
@@ -130,7 +130,7 @@ type CQEvent struct {
 	PostType string `json:"post_type"`
 }
 
-// 消息
+// CQMessage 消息
 type CQMessage struct {
 	Bot   *CQBot
 	Event *CQEvent
@@ -220,7 +220,7 @@ type CQMessage struct {
 }
 
 /*
-通知
+CQNotice 通知
 
 "group_upload"群文件上传,
 
@@ -320,18 +320,19 @@ type CQNoticeNotifyPoke struct { //系统通知_戳一戳
 
 	UserID   int `json:"user_id"`
 	TargetID int `json:"target_id"`
-	SenderID int `json:"sender_id"`
+	// SenderID int `json:"sender_id"` //go-cqhttp
+	OperatorID int `json:"operator_id"`
 
 	//for group poke
 	GroupID int `json:"group_id"`
 }
 
 /*
-请求
+CQRequest 请求
 
-//"friend"加好友请求,
+"friend"加好友请求,
 
-//"request"加群请求/邀请
+"request"加群请求/邀请
 */
 type CQRequest struct {
 	Bot   *CQBot
@@ -372,7 +373,7 @@ type CQRequestGroup struct { //加群请求/邀请
 }
 
 /*
-元事件
+CQMetaEvent 元事件
 
 "heartbeat"心跳包,
 
@@ -392,8 +393,10 @@ type CQMetaEventHeartbeat struct { //心跳包
 	MetaEvent *CQMetaEvent
 
 	//距离上一次心跳包的时间(ms)
+	//shamrock 15000
 	Interval int `json:"interval"`
-
+	//机器人账号
+	SelfID int `json:"self_id"`
 	//状态
 	Status struct {
 		Online   bool   `json:"online"`
@@ -404,22 +407,35 @@ type CQMetaEventHeartbeat struct { //心跳包
 			UserID   int    `json:"user_id"`
 		} `json:"self"`
 	} `json:"status"`
+	//子类型(恒)"connect"
+	SubType string `json:"sub_type"`
 }
 type CQMetaEventLifecycle struct { //生命周期
 	MetaEvent *CQMetaEvent
 
-	//当前时间戳
-	Time int `json:"time"`
+	//距离上一次心跳包的时间(ms)
+	//shamrock 15000
+	Interval int `json:"interval"`
 	//机器人账号
 	SelfID int `json:"self_id"`
+	//状态
+	Status struct {
+		Online   bool   `json:"online"`
+		Good     bool   `json:"good"`
+		QQStatus string `json:"qq.status"`
+		Self     struct {
+			Platform string `json:"platform"`
+			UserID   int    `json:"user_id"`
+		} `json:"self"`
+	} `json:"status"`
 
-	//上报方式(恒)2
+	//上报方式(恒)2 _gocq
 	PostMethod int `json:"_post_method"`
 	//子类型(恒)"connect"
 	SubType string `json:"sub_type"`
 }
 
-// API响应
+// CQApiResp API响应
 type CQApiResp struct {
 	Bot  *CQBot
 	Recv *CQRecv
@@ -435,25 +451,6 @@ type CQApiResp struct {
 }
 
 var (
-	timeLayout = struct {
-		L24  string
-		L24C string
-		M24  string
-		M24C string
-		S24  string
-		S24C string
-		T24  string
-		T24C string
-	}{
-		L24:  "2006/01/02 15:04:05",
-		L24C: "2006年01月02日15时04分05秒",
-		M24:  "01/02 15:04:05",
-		M24C: "01月02日15时04分05秒",
-		S24:  "02 15:04:05",
-		S24C: "02日15时04分05秒",
-		T24:  "15:04:05",
-		T24C: "15时04分05秒",
-	}
 	e = struct {
 		general        error
 		noEcho         error
@@ -474,8 +471,10 @@ var (
 )
 
 var (
-	unescape = strings.NewReplacer( //反转义还原CQ码
-		"&amp;", "&", "&#44;", ",", "&#91;", "[", "&#93;", "]")
+	unescape = strings.NewReplacer(
+		//反转义还原CQ码
+		"&amp;", "&", "&#44;", ",", "&#91;", "[", "&#93;", "]",
+	)
 )
 
 type log2SU struct {
@@ -483,31 +482,31 @@ type log2SU struct {
 }
 
 func (l *log2SU) Trace(msg ...any) (err error) {
-	return l.bot.SendPrivateMsgs(l.bot.superUsers, fmt.Sprint("[Trace] ", fmt.Sprint(msg...)))
+	return l.bot.SendPrivateMsgs(l.bot.SuperUsers, fmt.Sprint("[Trace] ", fmt.Sprint(msg...)))
 }
 func (l *log2SU) Debug(msg ...any) (err error) {
-	return l.bot.SendPrivateMsgs(l.bot.superUsers, fmt.Sprint("[Debug] ", fmt.Sprint(msg...)))
+	return l.bot.SendPrivateMsgs(l.bot.SuperUsers, fmt.Sprint("[Debug] ", fmt.Sprint(msg...)))
 }
 func (l *log2SU) Info(msg ...any) (err error) {
-	return l.bot.SendPrivateMsgs(l.bot.superUsers, fmt.Sprint("[Info] ", fmt.Sprint(msg...)))
+	return l.bot.SendPrivateMsgs(l.bot.SuperUsers, fmt.Sprint("[Info] ", fmt.Sprint(msg...)))
 }
 func (l *log2SU) Warn(msg ...any) (err error) {
-	return l.bot.SendPrivateMsgs(l.bot.superUsers, fmt.Sprint("[Warn] ", fmt.Sprint(msg...)))
+	return l.bot.SendPrivateMsgs(l.bot.SuperUsers, fmt.Sprint("[Warn] ", fmt.Sprint(msg...)))
 }
 func (l *log2SU) Error(msg ...any) (err error) {
-	return l.bot.SendPrivateMsgs(l.bot.superUsers, fmt.Sprint("[Error] ", fmt.Sprint(msg...)))
+	return l.bot.SendPrivateMsgs(l.bot.SuperUsers, fmt.Sprint("[Error] ", fmt.Sprint(msg...)))
 }
 func (l *log2SU) Fatal(msg ...any) (err error) {
-	return l.bot.SendPrivateMsgs(l.bot.superUsers, fmt.Sprint("[Fatal] ", fmt.Sprint(msg...)))
+	return l.bot.SendPrivateMsgs(l.bot.SuperUsers, fmt.Sprint("[Fatal] ", fmt.Sprint(msg...)))
 }
 func (l *log2SU) Panic(msg ...any) (err error) {
-	return l.bot.SendPrivateMsgs(l.bot.superUsers, fmt.Sprint("[Panic] ", fmt.Sprint(msg...)))
+	return l.bot.SendPrivateMsgs(l.bot.SuperUsers, fmt.Sprint("[Panic] ", fmt.Sprint(msg...)))
 }
 
-// 新建
+// New 新建并初始化
 func New() *CQBot {
 	bot := &CQBot{
-		blackList: &blackList{
+		BlackList: &blackList{
 			private: []int{},
 			group:   []int{},
 		},
@@ -515,10 +514,7 @@ func New() *CQBot {
 	bot.logLevel = logrus.InfoLevel
 	bot.log = logrus.New()
 	bot.log.SetLevel(bot.logLevel) //默认显示内部日志
-	bot.log.SetFormatter(&easy.Formatter{
-		TimestampFormat: timeLayout.M24,
-		LogFormat:       "[%time%] [%lvl%] %msg%\n",
-	})
+	bot.log.SetFormatter(&SimpleLogFormatter.LogFormat{})
 	bot.Log2SU = &log2SU{
 		bot: bot,
 	}
@@ -539,30 +535,30 @@ func New() *CQBot {
 	return bot
 }
 
-// 设置WebSocket链接
+// SetWsUrl 设置WebSocket链接
 func (bot *CQBot) SetWsUrl(url string) *CQBot {
 	matches := regexp.MustCompile(`ws://`).FindAllStringSubmatch(url, -1)
 	if len(matches) == 0 {
 		url = "ws://" + url
 	}
-	bot.wsUrl = url
+	bot.WsUrl = url
 	return bot
 }
 
-// 获取自身Q号_Shamrock
-func (bot *CQBot) GetSelfID() (selfID int) {
-	return bot.selfID
+// GetSelfId 获取自身Q号_Shamrock
+func (bot *CQBot) GetSelfId() (selfID int) {
+	return bot.SelfID
 }
 
-// 获取自身Q号
-func (bot *CQBot) GetSelfID_gocq() (selfID int) {
-	if bot.selfID != 0 {
-		return bot.selfID
+// GetSelfIdGocq 获取自身Q号_gocq
+func (bot *CQBot) GetSelfIdGocq() (selfID int) {
+	if bot.SelfID != 0 {
+		return bot.SelfID
 	}
 	bot.log.Debug("[EasyBot] bot.selfID 为 0, 尝试通过 get_login_info 获取selfID")
 	selfID, _, err := bot.GetLoginInfo()
 	if err != nil {
-		bot.log.Error("[EasyBot] GetSelfID().GetLoginInfo()调用失败, err: ", err)
+		bot.log.Error("[EasyBot] GetSelfId().GetLoginInfo()调用失败, err: ", err)
 	}
 	if !bot.IsHeartbeatOK {
 		bot.log.Fatal("[EasyBot] 试图在未连接go-cqhttp时调用bot.GetLoginInfo()")
@@ -570,42 +566,42 @@ func (bot *CQBot) GetSelfID_gocq() (selfID int) {
 	return
 }
 
-// 添加超级用户
-func (bot *CQBot) AddSU(user_ids ...int) *CQBot {
-	for _, user_id := range user_ids {
-		if user_id != 0 {
-			bot.superUsers = append(bot.superUsers, user_id)
+// AddSU 添加超级用户
+func (bot *CQBot) AddSU(userIds ...int) *CQBot {
+	for _, userId := range userIds {
+		if userId != 0 {
+			bot.SuperUsers = append(bot.SuperUsers, userId)
 		}
 	}
 	return bot
 }
 
-// 移除超级用户
-func (bot *CQBot) RmSU(user_ids ...int) *CQBot {
-	for _, user_id := range user_ids {
-		if user_id != 0 {
-			deleteValueInSlice[int](bot.superUsers, user_id)
+// RmSU 移除超级用户
+func (bot *CQBot) RmSU(userIds ...int) *CQBot {
+	for _, userId := range userIds {
+		if userId != 0 {
+			deleteValueInSlice[int](bot.SuperUsers, userId)
 		}
 	}
 	return bot
 }
 
-// 获取超级用户
+// GetSU 获取超级用户列表
 func (bot *CQBot) GetSU() []int {
-	return bot.superUsers
+	return bot.SuperUsers
 }
 
-// 添加机器人别称(用于判断IsToMe)
+// AddNickName 添加机器人别称(用于判断IsToMe)
 func (bot *CQBot) AddNickName(names ...string) *CQBot {
 	for _, name := range names {
-		if name != "" {
+		if name != "" { //要判断非空
 			bot.NickName = append(bot.NickName, name)
 		}
 	}
 	return bot
 }
 
-// 移除机器人别称
+// RmNickName 移除机器人别称
 func (bot *CQBot) RmNickName(names ...string) *CQBot {
 	for _, name := range names {
 		if name != "" {
@@ -615,108 +611,108 @@ func (bot *CQBot) RmNickName(names ...string) *CQBot {
 	return bot
 }
 
-// 获取机器人别称
+// GetBotNickName 获取机器人别称列表
 func (bot *CQBot) GetBotNickName() []string {
 	return bot.NickName
 }
 
-// 禁用日志输出
+// DisableLog 禁用Warn及以下等级的日志输出
 func (bot *CQBot) DisableLog() {
 	bot.SetLogLevel(logrus.ErrorLevel)
 }
 
-// 启用日志输出
+// EnableLog 启用日志输出
 func (bot *CQBot) EnableLog() {
 	bot.SetLogLevel(bot.logLevel)
 }
 
-// 设置日志等级
+// SetLogLevel 设置日志等级
 func (bot *CQBot) SetLogLevel(level logrus.Level) *CQBot {
 	bot.logLevel = level
 	bot.log.SetLevel(bot.logLevel)
 	return bot
 }
 
-// 上线通知
+// EnableOnlineNotification 设置上线通知
 func (bot *CQBot) EnableOnlineNotification(enable bool) *CQBot {
 	bot.IsEnableOnlineNotification = enable
 	return bot
 }
 
-// 下线通知
+// EnableOfflineNotification 设置下线通知
 func (bot *CQBot) EnableOfflineNotification(enable bool) *CQBot {
 	bot.IsEnableOfflineNotification = enable
 	return bot
 }
 
-// 添加私聊屏蔽
-func (bot *CQBot) AddPrivateBan(user_ids ...int) *CQBot {
-	for _, user_id := range user_ids {
-		if user_id != 0 {
-			bot.log.Info("[EasyBot] 向私聊屏蔽列表中加入了 ", user_id)
-			bot.blackList.private = append(bot.blackList.private, user_id)
+// AddPrivateBan 添加私聊屏蔽
+func (bot *CQBot) AddPrivateBan(userIds ...int) *CQBot {
+	for _, userId := range userIds {
+		if userId != 0 {
+			bot.log.Info("[EasyBot] 向私聊屏蔽列表中加入了 ", userId)
+			bot.BlackList.private = append(bot.BlackList.private, userId)
 		}
 	}
 	return bot
 }
 
-// 移除私聊屏蔽, 输入0时清空
-func (bot *CQBot) RmPrivateBan(user_ids ...int) *CQBot {
-	for _, user_id := range user_ids {
-		if user_id == 0 {
+// RmPrivateBan 移除私聊屏蔽, 输入0时清空列表
+func (bot *CQBot) RmPrivateBan(userIds ...int) *CQBot {
+	for _, userId := range userIds {
+		if userId == 0 {
 			bot.log.Info("[EasyBot] 清空了私聊屏蔽列表")
-			bot.blackList.private = *new([]int)
+			bot.BlackList.private = *new([]int)
 			return bot
 		}
-		bot.log.Info("[EasyBot] 从私聊屏蔽列表中移除了 ", user_id)
-		deleteValueInSlice[int](bot.blackList.private, user_id)
+		bot.log.Info("[EasyBot] 从私聊屏蔽列表中移除了 ", userId)
+		deleteValueInSlice[int](bot.BlackList.private, userId)
 	}
 	return bot
 }
 
-// 获取私聊屏蔽列表
+// GetPrivateBan 获取私聊屏蔽列表
 func (bot *CQBot) GetPrivateBan() []int {
-	return bot.blackList.private
+	return bot.BlackList.private
 }
 
-// 添加群聊屏蔽
-func (bot *CQBot) AddGroupBan(group_ids ...int) *CQBot {
-	for _, group_id := range group_ids {
-		if group_id != 0 {
-			bot.log.Info("[EasyBot] 向群聊屏蔽列表中加入了 ", group_id)
-			bot.blackList.group = append(bot.blackList.group, group_id)
+// AddGroupBan 添加群聊屏蔽
+func (bot *CQBot) AddGroupBan(groupIds ...int) *CQBot {
+	for _, groupId := range groupIds {
+		if groupId != 0 {
+			bot.log.Info("[EasyBot] 向群聊屏蔽列表中加入了 ", groupId)
+			bot.BlackList.group = append(bot.BlackList.group, groupId)
 		}
 	}
 	return bot
 }
 
-// 移除群聊屏蔽, 输入0时清空
-func (bot *CQBot) RmGroupBan(group_ids ...int) *CQBot {
-	for _, group_id := range group_ids {
-		if group_id == 0 {
+// RmGroupBan 移除群聊屏蔽, 输入0时清空列表
+func (bot *CQBot) RmGroupBan(groupIds ...int) *CQBot {
+	for _, groupId := range groupIds {
+		if groupId == 0 {
 			bot.log.Info("[EasyBot] 清空了群聊屏蔽列表")
-			bot.blackList.group = *new([]int)
+			bot.BlackList.group = *new([]int)
 			return bot
 		}
-		bot.log.Info("[EasyBot] 从群聊屏蔽列表中移除了 ", group_id)
-		deleteValueInSlice[int](bot.blackList.group, group_id)
+		bot.log.Info("[EasyBot] 从群聊屏蔽列表中移除了 ", groupId)
+		deleteValueInSlice[int](bot.BlackList.group, groupId)
 	}
 	return bot
 }
 
-// 获取群聊屏蔽列表
+// GetGroupBan 获取群聊屏蔽列表
 func (bot *CQBot) GetGroupBan() []int {
-	return bot.blackList.group
+	return bot.BlackList.group
 }
 
-// 获取QQ昵称
+// GetNickName 获取QQ昵称
 func (bot *CQBot) GetNickName(userId int) string {
 	bot.NNTMutex.Lock()
 	defer bot.NNTMutex.Unlock()
 	return bot.NickNameTable[userId]
 }
 
-// 获取群名片, 空时返回QQ昵称
+// GetCardName 获取群名片, 空时返回QQ昵称
 func (bot *CQBot) GetCardName(groupId, userId int) string {
 	bot.CNTMutex.Lock()
 	defer bot.CNTMutex.Unlock()
@@ -727,7 +723,7 @@ func (bot *CQBot) GetCardName(groupId, userId int) string {
 }
 
 /*
-预料之外的断开, 触发的前提是收到了第一个心跳包
+OnTerminateUnexpectedly 预料之外的断开, 触发的前提是收到了第一个心跳包
 
 e.g.:
 
@@ -744,164 +740,164 @@ func (bot *CQBot) OnTerminateUnexpectedly(f func()) *CQBot {
 	return bot
 }
 
-// gocq数据下发
-func (bot *CQBot) OnData(f func(*CQRecv)) *CQBot {
+// OnRecv 数据下发
+func (bot *CQBot) OnRecv(f func(*CQRecv)) *CQBot {
 	bot.On.Recv = f
 	return bot
 }
 
-// Api调用回复
+// OnApiResp api调用响应
 func (bot *CQBot) OnApiResp(f func(*CQApiResp)) *CQBot {
 	bot.On.ApiResp = f
 	return bot
 }
 
-// 下发事件
+// OnEvent 事件下发
 func (bot *CQBot) OnEvent(f func(*CQEvent)) *CQBot {
 	bot.On.Event = f
 	return bot
 }
 
-// 接收消息
+// OnMessage 消息接收
 func (bot *CQBot) OnMessage(f func(*CQMessage)) *CQBot {
 	bot.On.Message = f
 	return bot
 }
 
-/*
-接收私聊消息
-
-(更推荐直接在OnMessage中判断*CQMessage.MessageType)
-*/
+// OnMessagePrivate 私聊消息接收
+//
+// 更推荐直接在OnMessage中判断*CQMessage.MessageType
 func (bot *CQBot) OnMessagePrivate(f func(*CQMessage)) *CQBot {
 	bot.On.MessagePrivate = f
 	return bot
 }
 
-/*
-接收群消息
-
-(更推荐直接在OnMessage中判断*CQMessage.MessageType)
-*/
+// OnMessageGroup 群聊消息接收
+//
+// 更推荐直接在OnMessage中判断*CQMessage.MessageType
 func (bot *CQBot) OnMessageGroup(f func(*CQMessage)) *CQBot {
 	bot.On.MessageGroup = f
 	return bot
 }
 
-// 接收通知
+// OnNotice 通知下发
 func (bot *CQBot) OnNotice(f func(*CQNotice)) *CQBot {
 	bot.On.Notice = f
 	return bot
 }
 
-// 好友消息撤回
+// OnFriendRecall 好友消息撤回
 func (bot *CQBot) OnFriendRecall(f func(*CQNoticeFriendRecall)) *CQBot {
 	bot.On.FriendRecall = f
 	return bot
 }
 
-// 群消息撤回
+// OnGroupRecall 群聊消息撤回
 func (bot *CQBot) OnGroupRecall(f func(*CQNoticeGroupRecall)) *CQBot {
 	bot.On.GroupRecall = f
 	return bot
 }
 
-// 群名片变更
+// OnGroupCard 群名片变更
 func (bot *CQBot) OnGroupCard(f func(*CQNoticeGroupCard)) *CQBot {
 	bot.On.GroupCard = f
 	return bot
 }
 
-// 群文件上传
+// OnGroupUpload 群文件上传
 func (bot *CQBot) OnGroupUpload(f func(*CQNoticeGroupUpload)) *CQBot {
 	bot.On.GroupUpload = f
 	return bot
 }
 
-// 离线文件上传
+// OnOfflineFile 离线文件上传
 func (bot *CQBot) OnOfflineFile(f func(*CQNoticeOfflineFile)) *CQBot {
 	bot.On.OfflineFile = f
 	return bot
 }
 
-// 系统通知
+// OnNotify 系统通知下发
 func (bot *CQBot) OnNotify(f func(*CQNoticeNotify)) *CQBot {
 	bot.On.Notify = f
 	return bot
 }
 
-// 戳一戳
+// OnPoke 戳一戳
 func (bot *CQBot) OnPoke(f func(*CQNoticeNotifyPoke)) *CQBot {
 	bot.On.Poke = f
 	return bot
 }
 
-// 请求
+// OnRequest 请求
 func (bot *CQBot) OnRequest(f func(*CQRequest)) *CQBot {
 	bot.On.Request = f
 	return bot
 }
 
-// 加好友请求
+// OnRequestFriend 加好友请求
 func (bot *CQBot) OnRequestFriend(f func(*CQRequestFriend)) *CQBot {
 	bot.On.RequestFriend = f
 	return bot
 }
 
-// 加群请求/邀请
+// OnRequestGroup 加群请求/邀请
 func (bot *CQBot) OnRequestGroup(f func(*CQRequestGroup)) *CQBot {
 	bot.On.RequestGroup = f
 	return bot
 }
 
-// 元事件
+// OnMetaEvent 元事件
 func (bot *CQBot) OnMetaEvent(f func(*CQMetaEvent)) *CQBot {
 	bot.On.MetaEvent = f
 	return bot
 }
 
-// 心跳包
+// OnHeatbeat 心跳
 func (bot *CQBot) OnHeatbeat(f func(*CQMetaEventHeartbeat)) *CQBot {
 	bot.On.Heartbeat = f
 	return bot
 }
 
-// 生命周期
+// OnLifecycle 生命周期
 func (bot *CQBot) OnLifecycle(f func(*CQMetaEventLifecycle)) *CQBot {
 	bot.On.Lifecycle = f
 	return bot
 }
 
+// GetRunningTime 返回建立连接到目前经过的时间
 func (bot *CQBot) GetRunningTime() time.Duration {
 	return time.Since(bot.StartTime)
 }
 
-// 断开CQ连接
+// Disconnect 断开CQ连接
 func (bot *CQBot) Disconnect() {
 	if bot.IsEnableOfflineNotification {
-		_ = bot.Log2SU.Info("[EasyBot] 已下线")
+		err := bot.Log2SU.Info("[EasyBot] 已下线")
+		if err != nil {
+			bot.log.Error("[EasyBot] 向超级用户发送消息失败: ", err)
+		}
 	}
-	<-time.After(time.Millisecond * 100)
 	bot.IsExpectedTermination = true
 	if bot.Conn != nil {
-		bot.Conn.Close()
+		err := bot.Conn.Close()
+		if err != nil {
+			bot.log.Error("[EasyBot] ws连接断开失败: ", err)
+		}
 	}
 }
 
-/*
-连接CQ
-
-autoRetry 为 true 时会自动尝试重连 (每5s)
-
-不传入 retryCount 或 retryCount[0] <= 0 时视为无限重试
-
-传入多个 retryCount 只认第一个
-*/
+// Connect 与CQ建立连接
+//
+// autoRetry 为 true 时会自动尝试重连 (每5s)
+//
+// 不传入 retryCount 或 retryCount[0] <= 0 时视为无限重试
+//
+// 传入多个 retryCount 只认第一个
 func (bot *CQBot) Connect(autoRetry bool, retryCount ...int) (err error) {
-	if bot.wsUrl == "" {
+	if bot.WsUrl == "" {
 		bot.log.Fatal("EMPTY WEBSOCKET URL")
 	}
-	if len(bot.superUsers) == 0 {
+	if len(bot.SuperUsers) == 0 {
 		return e.noSU
 	}
 	bot.IsExpectedTermination = false
@@ -913,7 +909,7 @@ func (bot *CQBot) Connect(autoRetry bool, retryCount ...int) (err error) {
 	}()
 
 retryLoop:
-	c, err := websocket.Dial(bot.wsUrl, "", "http://127.0.0.1")
+	c, err := websocket.Dial(bot.WsUrl, "", "http://127.0.0.1")
 	if err != nil {
 		bot.log.Error("[EasyBot] 建立ws连接失败, err: ", err)
 
@@ -941,7 +937,12 @@ retryLoop:
 	bot.IsHeartbeatOK = true
 	bot.Conn = c
 	if bot.IsEnableOnlineNotification {
-		_ = bot.Log2SU.Info("[EasyBot] 已上线")
+		go func() {
+			err := bot.Log2SU.Info("[EasyBot] 已上线")
+			if err != nil {
+				bot.log.Error("[EasyBot] 向超级用户发送消息失败: ", err)
+			}
+		}()
 	}
 	go bot.recvLoop()
 	// bot.initSelfInfo() //RIP go-cqhttp
@@ -957,7 +958,7 @@ func (bot *CQBot) initSelfInfo() {
 		bot.log.Fatal("[EasyBot] 初始化账号信息失败, err: ", err)
 	}
 	bot.log.Info("[EasyBot] 获取账号信息: ", selfNickName, "(", selfID, ")")
-	bot.selfID = selfID
+	bot.SelfID = selfID
 	bot.AddNickName(selfNickName) //用来识别假at
 	bot.log.Info("initSelfInfo return")
 }
@@ -967,8 +968,6 @@ func (bot *CQBot) recvLoop() {
 		close(bot.ConnLost)
 		bot.ConnLost = make(chan struct{})
 	}()
-	bot.HeartbeatWaitGroup.Add(1) //等待心跳包获取间隔
-	go bot.heartbeatLoop()
 	for {
 		dataReceived := &CQRecv{
 			Bot: bot,
@@ -999,18 +998,25 @@ func (bot *CQBot) recvLoop() {
 	}
 }
 
-// 上报数据
+// PostData 上报数据
 func (bot *CQBot) PostData(pData *CQPost) error {
 	if bot.IsHeartbeatOK {
 		bData, err := json.Marshal(pData.Raw)
 		if err != nil {
-			bot.log.Warn("[EasyBot] 序列化出错(json.Marshal(pData.Raw)), err: ", err,
+			bot.log.Warn(
+				"[EasyBot] 序列化出错(json.Marshal(pData.Raw)), err: ", err,
 				"\n    resp.Data: ", pData.Raw,
-				"\n    Marshal by gson: ", gson.New(pData.Raw).JSON("", ""))
+				"\n    Marshal by gson: ", gson.New(pData.Raw).JSON("", ""),
+			)
 			return err
 		}
 		bot.log.Trace("[EasyBot] rawPost: ", string(bData))
-		go bot.Conn.Write(bData)
+		go func() {
+			_, err := bot.Conn.Write(bData)
+			if err != nil {
+				bot.log.Error("[EasyBot] 向ws连接发送数据失败: ", err)
+			}
+		}()
 		return nil
 	} else {
 		bot.log.Error("[EasyBot] 未连接到go-cqhttp!")
@@ -1030,9 +1036,11 @@ func (bot *CQBot) handleRecv(recv *CQRecv) {
 
 	err = json.Unmarshal(recv.Raw, apiResp)
 	if err != nil {
-		bot.log.Warn("[EasyBot] 反序列化出错(CQApiResp), 跳过处理, err: ", err,
+		bot.log.Warn(
+			"[EasyBot] 反序列化出错(CQApiResp), 跳过处理, err: ", err,
 			"\n    recv.Raw: ", string(recv.Raw),
-			"\n    Unmarshal by gson: ", gson.New(recv.Raw).JSON("", ""))
+			"\n    Unmarshal by gson: ", gson.New(recv.Raw).JSON("", ""),
+		)
 		return
 	}
 
@@ -1058,9 +1066,11 @@ func (bot *CQBot) handleRecv(recv *CQRecv) {
 
 	err = json.Unmarshal(recv.Raw, event)
 	if err != nil {
-		bot.log.Warn("[EasyBot] 反序列化出错(Event), 跳过处理, err: ", err,
+		bot.log.Warn(
+			"[EasyBot] 反序列化出错(Event), 跳过处理, err: ", err,
 			"\n    recv.Raw: ", string(recv.Raw),
-			"\n    Unmarshal by gson: ", gson.New(recv.Raw).JSON("", ""))
+			"\n    Unmarshal by gson: ", gson.New(recv.Raw).JSON("", ""),
+		)
 		return
 	}
 
@@ -1078,9 +1088,11 @@ func (bot *CQBot) handleRecv(recv *CQRecv) {
 
 		err = json.Unmarshal(recv.Raw, msg)
 		if err != nil {
-			bot.log.Warn("[EasyBot] 反序列化出错(Event.Message), 跳过处理, err: ", err,
+			bot.log.Warn(
+				"[EasyBot] 反序列化出错(Event.Message), 跳过处理, err: ", err,
 				"\n    recv.Raw: ", string(recv.Raw),
-				"\n    Unmarshal by gson: ", gson.New(recv.Raw).JSON("", ""))
+				"\n    Unmarshal by gson: ", gson.New(recv.Raw).JSON("", ""),
+			)
 			return
 		}
 
@@ -1088,7 +1100,7 @@ func (bot *CQBot) handleRecv(recv *CQRecv) {
 			return bot.isBannedPrivate(msg.UserID) || bot.isBannedGroup(msg.GroupID)
 		}()
 
-		if msg.UserID != bot.selfID {
+		if msg.UserID != bot.SelfID {
 			ban := func() string {
 				if isBanned {
 					return "(Filtered)"
@@ -1097,13 +1109,17 @@ func (bot *CQBot) handleRecv(recv *CQRecv) {
 			}()
 			switch msg.MessageType {
 			case "private":
-				bot.log.Info("[EasyBot] ", ban, "收到 ",
+				bot.log.Info(
+					"[EasyBot] ", ban, "收到 ",
 					msg.Sender.NickName, "(", msg.UserID, ") 的消息(",
-					msg.MessageID, "): ", msg.RawMessage)
+					msg.MessageID, "): ", msg.RawMessage,
+				)
 			case "group":
-				bot.log.Info("[EasyBot] ", ban, "在 ", msg.GroupID, " 收到 ",
+				bot.log.Info(
+					"[EasyBot] ", ban, "在 ", msg.GroupID, " 收到 ",
 					msg.Sender.CardName, "(", msg.Sender.NickName, " ", msg.UserID, ") 的群聊消息(",
-					msg.MessageID, "): ", msg.RawMessage)
+					msg.MessageID, "): ", msg.RawMessage,
+				)
 			}
 		} else {
 			bot.log.Info("[EasyBot] 收到机器人账号发送的消息(", msg.MessageID, "): ", msg.RawMessage)
@@ -1138,9 +1154,11 @@ func (bot *CQBot) handleRecv(recv *CQRecv) {
 
 		err = json.Unmarshal(recv.Raw, request)
 		if err != nil {
-			bot.log.Warn("[EasyBot] 反序列化出错(Event.Request), 跳过处理, err: ", err,
+			bot.log.Warn(
+				"[EasyBot] 反序列化出错(Event.Request), 跳过处理, err: ", err,
 				"\n    recv.Raw: ", string(recv.Raw),
-				"\n    Unmarshal by gson: ", gson.New(recv.Raw).JSON("", ""))
+				"\n    Unmarshal by gson: ", gson.New(recv.Raw).JSON("", ""),
+			)
 			return
 		}
 
@@ -1157,9 +1175,11 @@ func (bot *CQBot) handleRecv(recv *CQRecv) {
 
 			err = json.Unmarshal(recv.Raw, friend)
 			if err != nil {
-				bot.log.Warn("[EasyBot] 反序列化出错(Event.Request.Friend), 跳过处理, err: ", err,
+				bot.log.Warn(
+					"[EasyBot] 反序列化出错(Event.Request.Friend), 跳过处理, err: ", err,
 					"\n    recv.Raw: ", string(recv.Raw),
-					"\n    Unmarshal by gson: ", gson.New(recv.Raw).JSON("", ""))
+					"\n    Unmarshal by gson: ", gson.New(recv.Raw).JSON("", ""),
+				)
 				return
 			}
 
@@ -1177,9 +1197,11 @@ func (bot *CQBot) handleRecv(recv *CQRecv) {
 
 			err = json.Unmarshal(recv.Raw, group)
 			if err != nil {
-				bot.log.Warn("[EasyBot] 反序列化出错(Event.Request.Group), 跳过处理, err: ", err,
+				bot.log.Warn(
+					"[EasyBot] 反序列化出错(Event.Request.Group), 跳过处理, err: ", err,
 					"\n    recv.Raw: ", string(recv.Raw),
-					"\n    Unmarshal by gson: ", gson.New(recv.Raw).JSON("", ""))
+					"\n    Unmarshal by gson: ", gson.New(recv.Raw).JSON("", ""),
+				)
 				return
 			}
 
@@ -1187,7 +1209,10 @@ func (bot *CQBot) handleRecv(recv *CQRecv) {
 			case "add":
 				bot.log.Info("[EasyBot] 群 ", group.GroupID, " 收到 ", group.UserID, " 的加群申请, 验证消息: ", group.Comment)
 			case "invite":
-				bot.log.Info("[EasyBot] 好友 ", group.UserID, " 邀请机器人加入群 ", group.GroupID, ", 验证消息(应为空?): ", group.Comment)
+				bot.log.Info(
+					"[EasyBot] 好友 ", group.UserID, " 邀请机器人加入群 ", group.GroupID, ", 验证消息(应为空?): ",
+					group.Comment,
+				)
 			}
 
 			//回调vvvvvvvv
@@ -1204,9 +1229,11 @@ func (bot *CQBot) handleRecv(recv *CQRecv) {
 
 		err = json.Unmarshal(recv.Raw, notice)
 		if err != nil {
-			bot.log.Warn("[EasyBot] 反序列化出错(Event.Notice), 跳过处理, err: ", err,
+			bot.log.Warn(
+				"[EasyBot] 反序列化出错(Event.Notice), 跳过处理, err: ", err,
 				"\n    recv.Raw: ", string(recv.Raw),
-				"\n    Unmarshal by gson: ", gson.New(recv.Raw).JSON("", ""))
+				"\n    Unmarshal by gson: ", gson.New(recv.Raw).JSON("", ""),
+			)
 			return
 		}
 
@@ -1223,13 +1250,17 @@ func (bot *CQBot) handleRecv(recv *CQRecv) {
 
 			err = json.Unmarshal(recv.Raw, groupRecall)
 			if err != nil {
-				bot.log.Warn("[EasyBot] 反序列化出错(Event.Notice.GroupRecall), 跳过处理, err: ", err,
+				bot.log.Warn(
+					"[EasyBot] 反序列化出错(Event.Notice.GroupRecall), 跳过处理, err: ", err,
 					"\n    recv.Raw: ", string(recv.Raw),
-					"\n    Unmarshal by gson: ", gson.New(recv.Raw).JSON("", ""))
+					"\n    Unmarshal by gson: ", gson.New(recv.Raw).JSON("", ""),
+				)
 				return
 			}
 
-			bot.log.Info("[EasyBot] 群 ", groupRecall.GroupID, " 中 ", groupRecall.UserID, " 撤回群聊消息: ", groupRecall.MessageID)
+			bot.log.Info(
+				"[EasyBot] 群 ", groupRecall.GroupID, " 中 ", groupRecall.UserID, " 撤回群聊消息: ", groupRecall.MessageID,
+			)
 
 			go bot.grMark(groupRecall)
 
@@ -1245,9 +1276,11 @@ func (bot *CQBot) handleRecv(recv *CQRecv) {
 
 			err = json.Unmarshal(recv.Raw, friendRecall)
 			if err != nil {
-				bot.log.Warn("[EasyBot] 反序列化出错(Event.Notice.FriendRecall), 跳过处理, err: ", err,
+				bot.log.Warn(
+					"[EasyBot] 反序列化出错(Event.Notice.FriendRecall), 跳过处理, err: ", err,
 					"\n    recv.Raw: ", string(recv.Raw),
-					"\n    Unmarshal by gson: ", gson.New(recv.Raw).JSON("", ""))
+					"\n    Unmarshal by gson: ", gson.New(recv.Raw).JSON("", ""),
+				)
 				return
 			}
 
@@ -1267,13 +1300,18 @@ func (bot *CQBot) handleRecv(recv *CQRecv) {
 
 			err = json.Unmarshal(recv.Raw, groupCard)
 			if err != nil {
-				bot.log.Warn("[EasyBot] 反序列化出错(Event.Notice.GroupCard), 跳过处理, err: ", err,
+				bot.log.Warn(
+					"[EasyBot] 反序列化出错(Event.Notice.GroupCard), 跳过处理, err: ", err,
 					"\n    recv.Raw: ", string(recv.Raw),
-					"\n    Unmarshal by gson: ", gson.New(recv.Raw).JSON("", ""))
+					"\n    Unmarshal by gson: ", gson.New(recv.Raw).JSON("", ""),
+				)
 				return
 			}
 
-			bot.log.Info("[EasyBot] 群 ", groupCard.GroupID, " 中 ", groupCard.UserID, " 更新了群名片: ", groupCard.CardOld, " -> ", groupCard.CardNew)
+			bot.log.Info(
+				"[EasyBot] 群 ", groupCard.GroupID, " 中 ", groupCard.UserID, " 更新了群名片: ", groupCard.CardOld, " -> ",
+				groupCard.CardNew,
+			)
 
 			//回调vvvvvvvv
 			if bot.On.GroupCard != nil {
@@ -1287,13 +1325,18 @@ func (bot *CQBot) handleRecv(recv *CQRecv) {
 
 			err = json.Unmarshal(recv.Raw, groupUpload)
 			if err != nil {
-				bot.log.Warn("[EasyBot] 反序列化出错(Event.Notice.GroupUpload), 跳过处理, err: ", err,
+				bot.log.Warn(
+					"[EasyBot] 反序列化出错(Event.Notice.GroupUpload), 跳过处理, err: ", err,
 					"\n    recv.Raw: ", string(recv.Raw),
-					"\n    Unmarshal by gson: ", gson.New(recv.Raw).JSON("", ""))
+					"\n    Unmarshal by gson: ", gson.New(recv.Raw).JSON("", ""),
+				)
 				return
 			}
 
-			bot.log.Info("[EasyBot] 群 ", groupUpload.GroupID, " 中 ", groupUpload.UserID, " 上传了文件: ", groupUpload.File.Name, "(", groupUpload.File.Size/1024/1024, "MB) ", groupUpload.File.Url)
+			bot.log.Info(
+				"[EasyBot] 群 ", groupUpload.GroupID, " 中 ", groupUpload.UserID, " 上传了文件: ", groupUpload.File.Name, "(",
+				groupUpload.File.Size/1024/1024, "MB) ", groupUpload.File.Url,
+			)
 
 			//回调vvvvvvvv
 			if bot.On.GroupUpload != nil {
@@ -1307,13 +1350,18 @@ func (bot *CQBot) handleRecv(recv *CQRecv) {
 
 			err = json.Unmarshal(recv.Raw, offlineFile)
 			if err != nil {
-				bot.log.Warn("[EasyBot] 反序列化出错(Event.Notice.OfflineFile), 跳过处理, err: ", err,
+				bot.log.Warn(
+					"[EasyBot] 反序列化出错(Event.Notice.OfflineFile), 跳过处理, err: ", err,
 					"\n    recv.Raw: ", string(recv.Raw),
-					"\n    Unmarshal by gson: ", gson.New(recv.Raw).JSON("", ""))
+					"\n    Unmarshal by gson: ", gson.New(recv.Raw).JSON("", ""),
+				)
 				return
 			}
 
-			bot.log.Info("[EasyBot] 好友 ", offlineFile.UserID, " 发送了离线文件: ", offlineFile.File.Name, "(", offlineFile.File.Size/1024/1024, ") ", offlineFile.File.Url)
+			bot.log.Info(
+				"[EasyBot] 好友 ", offlineFile.UserID, " 发送了离线文件: ", offlineFile.File.Name, "(",
+				offlineFile.File.Size/1024/1024, ") ", offlineFile.File.Url,
+			)
 
 			//回调vvvvvvvv
 			if bot.On.OfflineFile != nil {
@@ -1327,9 +1375,11 @@ func (bot *CQBot) handleRecv(recv *CQRecv) {
 
 			err = json.Unmarshal(recv.Raw, notify)
 			if err != nil {
-				bot.log.Warn("[EasyBot] 反序列化出错(Event.Notice.Notify), 跳过处理, err: ", err,
+				bot.log.Warn(
+					"[EasyBot] 反序列化出错(Event.Notice.Notify), 跳过处理, err: ", err,
 					"\n    recv.Raw: ", string(recv.Raw),
-					"\n    Unmarshal by gson: ", gson.New(recv.Raw).JSON("", ""))
+					"\n    Unmarshal by gson: ", gson.New(recv.Raw).JSON("", ""),
+				)
 				return
 			}
 
@@ -1346,13 +1396,15 @@ func (bot *CQBot) handleRecv(recv *CQRecv) {
 
 				err = json.Unmarshal(recv.Raw, poke)
 				if err != nil {
-					bot.log.Warn("[EasyBot] 反序列化出错(Event.Notice.Notify.Poke), 跳过处理, err: ", err,
+					bot.log.Warn(
+						"[EasyBot] 反序列化出错(Event.Notice.Notify.Poke), 跳过处理, err: ", err,
 						"\n    recv.Raw: ", string(recv.Raw),
-						"\n    Unmarshal by gson: ", gson.New(recv.Raw).JSON("", ""))
+						"\n    Unmarshal by gson: ", gson.New(recv.Raw).JSON("", ""),
+					)
 					return
 				}
 
-				bot.log.Info("[EasyBot] ", poke.SenderID, " 戳了戳 ", poke.TargetID)
+				bot.log.Info("[EasyBot] ", poke.OperatorID, " 戳了戳 ", poke.TargetID)
 
 				//回调vvvvvvvv
 				if bot.On.Poke != nil {
@@ -1373,9 +1425,11 @@ func (bot *CQBot) handleRecv(recv *CQRecv) {
 
 		err = json.Unmarshal(recv.Raw, metaEvent)
 		if err != nil {
-			bot.log.Warn("[EasyBot] 反序列化出错(Event.MetaEvent), 跳过处理, err: ", err,
+			bot.log.Warn(
+				"[EasyBot] 反序列化出错(Event.MetaEvent), 跳过处理, err: ", err,
 				"\n    recv.Raw: ", string(recv.Raw),
-				"\n    Unmarshal by gson: ", gson.New(recv.Raw).JSON("", ""))
+				"\n    Unmarshal by gson: ", gson.New(recv.Raw).JSON("", ""),
+			)
 			return
 		}
 
@@ -1387,13 +1441,14 @@ func (bot *CQBot) handleRecv(recv *CQRecv) {
 
 			err = json.Unmarshal(recv.Raw, heartbeat)
 			if err != nil {
-				bot.log.Warn("[EasyBot] 反序列化出错(Event.MetaEvent.Heartbeat), 跳过处理, err: ", err,
+				bot.log.Warn(
+					"[EasyBot] 反序列化出错(Event.MetaEvent.Heartbeat), 跳过处理, err: ", err,
 					"\n    recv.Raw: ", string(recv.Raw),
-					"\n    Unmarshal by gson: ", gson.New(recv.Raw).JSON("", ""))
+					"\n    Unmarshal by gson: ", gson.New(recv.Raw).JSON("", ""),
+				)
 				return
 			}
 
-			bot.log.Debug("[EasyBot] Heartbeat: ", heartbeat.Interval)
 			go bot.handleHeartbeat(heartbeat)
 
 			//回调vvvvvvvv
@@ -1408,13 +1463,14 @@ func (bot *CQBot) handleRecv(recv *CQRecv) {
 
 			err = json.Unmarshal(recv.Raw, lifecycle)
 			if err != nil {
-				bot.log.Warn("[EasyBot] 反序列化出错(Event.MetaEvent.Lifecycle), 跳过处理, err: ", err,
+				bot.log.Warn(
+					"[EasyBot] 反序列化出错(Event.MetaEvent.Lifecycle), 跳过处理, err: ", err,
 					"\n    recv.Raw: ", string(recv.Raw),
-					"\n    Unmarshal by gson: ", gson.New(recv.Raw).JSON("", ""))
+					"\n    Unmarshal by gson: ", gson.New(recv.Raw).JSON("", ""),
+				)
 				return
 			}
 
-			bot.log.Info("[EasyBot] Lifecycle: ", string(recv.Raw))
 			go bot.handleLifecycle(lifecycle)
 
 			//回调vvvvvvvv
@@ -1432,7 +1488,7 @@ func (bot *CQBot) handleRecv(recv *CQRecv) {
 
 // 屏蔽私聊
 func (bot *CQBot) isBannedPrivate(uid int) bool {
-	for _, bannedUid := range bot.blackList.private {
+	for _, bannedUid := range bot.BlackList.private {
 		if bannedUid == uid {
 			return true
 		}
@@ -1442,7 +1498,7 @@ func (bot *CQBot) isBannedPrivate(uid int) bool {
 
 // 屏蔽群聊检测
 func (bot *CQBot) isBannedGroup(gid int) bool {
-	for _, bannedGid := range bot.blackList.group {
+	for _, bannedGid := range bot.BlackList.group {
 		if bannedGid == gid {
 			return true
 		}
@@ -1452,7 +1508,7 @@ func (bot *CQBot) isBannedGroup(gid int) bool {
 
 // 消息缓存
 func (bot *CQBot) saveMsg(msg *CQMessage) {
-	msg.Extra.TimeFormat = time.Unix(int64(msg.Event.Time), 0).Format(timeLayout.T24)
+	msg.Extra.TimeFormat = time.Unix(int64(msg.Event.Time), 0).Format(TimeLayout.T24)
 	msg.Extra.AtWho = msg.collectAt()
 	msg.Extra.MessageWithReply = msg.entityReply()
 	switch msg.MessageType {
@@ -1465,7 +1521,7 @@ func (bot *CQBot) saveMsg(msg *CQMessage) {
 		bot.MTGMutex.Unlock()
 
 		bot.saveCardName(msg.Sender.GroupID, msg.Sender.UserID, msg.Sender.CardName)
-		bot.saveNickName(msg.Sender.UserID, msg.Sender.CardName)
+		bot.saveNickName(msg.Sender.UserID, msg.Sender.NickName)
 
 	case "private":
 		bot.MTPMutex.Lock()
@@ -1475,7 +1531,7 @@ func (bot *CQBot) saveMsg(msg *CQMessage) {
 		bot.MessageTablePrivate[msg.UserID][msg.MessageID] = msg
 		bot.MTPMutex.Unlock()
 
-		bot.saveNickName(msg.Sender.UserID, msg.Sender.CardName)
+		bot.saveNickName(msg.Sender.UserID, msg.Sender.NickName)
 	}
 }
 
@@ -1494,7 +1550,7 @@ func (bot *CQBot) saveCardName(groupId, userId int, cardName string) {
 	bot.CNTMutex.Unlock()
 }
 
-var rmCardReg = regexp.MustCompile(`^\[CQ:json,data=|\]$`)
+var rmCardReg = regexp.MustCompile(`^\[CQ:json,data=|]$`)
 
 func (msg *CQMessage) ToCardMsg() (cardMsg *CQCardMsg, err error) {
 	s := unescape.Replace(msg.GetRawMessageOrMessage())
@@ -1506,7 +1562,7 @@ func (msg *CQMessage) ToCardMsg() (cardMsg *CQCardMsg, err error) {
 
 // @的人列表
 func (msg *CQMessage) collectAt() (atWho []int) {
-	matches := msg.RegexpFindAllStringSubmatch(`\[CQ:reply,id=(-?[0-9]*)]`) //回复也算@
+	matches := msg.RegFindAllStringSubmatch(regexp.MustCompile(`\[CQ:reply,id=(-?[0-9]*)]`)) //回复也算@
 	if len(matches) > 0 {
 		replyid, _ := strconv.Atoi(matches[0][1])
 		switch msg.MessageType {
@@ -1524,7 +1580,7 @@ func (msg *CQMessage) collectAt() (atWho []int) {
 			msg.Bot.MTPMutex.Unlock()
 		}
 	}
-	matches = msg.RegexpFindAllStringSubmatch(`\[CQ:at,qq=(\d+)]`)
+	matches = msg.RegFindAllStringSubmatch(regexp.MustCompile(`\[CQ:at,qq=(\d+)]`))
 	if len(matches) > 0 {
 		for _, match := range matches {
 			atId, _ := strconv.Atoi(match[1])
@@ -1546,7 +1602,7 @@ func (msg *CQMessage) collectAt() (atWho []int) {
 // 具体化回复，go-cqhttp.extra-reply-data: true时不必要，但是开了那玩意又会导致回复带上原文又触发一遍机器人
 func (msg *CQMessage) entityReply() (message string) {
 	message = msg.GetRawMessageOrMessage()
-	match := msg.RegexpFindAllStringSubmatch(`\[CQ:reply,id=(-?[0-9]*)]`)
+	match := msg.RegFindAllStringSubmatch(regexp.MustCompile(`\[CQ:reply,id=(-?[0-9]*)]`))
 	if len(match) > 0 {
 		replyIdS := match[0][1]
 		replyId, _ := strconv.Atoi(replyIdS)
@@ -1575,7 +1631,9 @@ func (msg *CQMessage) entityReply() (message string) {
 		}
 		var replyCQ string
 		if replyMsg.Event != nil {
-			replyCQ = fmt.Sprint("[CQ:reply,qq=", replyMsg.UserID, ",time=", replyMsg.Event.Time, ",text=", replyMsg.RawMessage, "]")
+			replyCQ = fmt.Sprint(
+				"[CQ:reply,qq=", replyMsg.UserID, ",time=", replyMsg.Event.Time, ",text=", replyMsg.RawMessage, "]",
+			)
 		} else {
 			replyCQ = fmt.Sprint("[CQ:reply,qq=", replyMsg.UserID, ",time=", replyMsg.Time, ",text=", replyMsg.RawMessage, "]")
 		}
@@ -1651,18 +1709,17 @@ func (bot *CQBot) grMark(gr *CQNoticeGroupRecall) {
 func (bot *CQBot) handleHeartbeat(hb *CQMetaEventHeartbeat) {
 	bot.IsHeartbeatOK = true
 	bot.HeartbeatInterval = hb.Interval
-	bot.selfID = hb.Status.Self.UserID
-	if !bot.IsHeartbeatChecking {
-		bot.HeartbeatWaitGroup.Done()
-	}
+	bot.SelfID = hb.SelfID
 	bot.Heartbeat <- struct{}{}
 }
 
 // 生命周期
 func (bot *CQBot) handleLifecycle(lc *CQMetaEventLifecycle) {
-	if lc.SelfID != 0 {
-		bot.log.Debug("[EasyBot] 成功获取连接go-cqhttp并获取生命周期: ")
-	} else {
+	bot.SelfID = lc.SelfID
+	bot.IsHeartbeatOK = true
+	bot.HeartbeatInterval = lc.Interval
+	go bot.heartbeatLoop()
+	if lc.SelfID == 0 {
 		bot.log.Error("[EasyBot] Unexpected Error: 'bot.SelfID == 0' in '(bot *CQBot) handleLifecycle()'")
 	}
 }
@@ -1670,12 +1727,9 @@ func (bot *CQBot) handleLifecycle(lc *CQMetaEventLifecycle) {
 // 心跳监听
 func (bot *CQBot) heartbeatLoop() {
 	if bot.IsHeartbeatChecking {
+		//保证单一
 		return
 	}
-	if bot.HeartbeatInterval == 0 {
-		bot.HeartbeatWaitGroup.Wait()
-	}
-
 	bot.IsHeartbeatChecking = true
 	bot.log.Info("[EasyBot] 开始监听 CQ 心跳")
 	defer func() {
@@ -1692,12 +1746,15 @@ func (bot *CQBot) heartbeatLoop() {
 			bot.HeartbeatCount++
 			bot.log.Debug("[EasyBot] 心跳接收#", bot.HeartbeatCount)
 			continue
-		case <-time.After(time.Millisecond * time.Duration(bot.HeartbeatInterval+500)):
+		case <-time.After(time.Millisecond * time.Duration(bot.HeartbeatInterval+1000)):
 			bot.HeartbeatLostCount++
 			if bot.HeartbeatLostCount > 2 {
 				bot.log.Error("[EasyBot] 心跳超时 ", bot.HeartbeatLostCount, " 次, 丢弃连接")
 				bot.HeartbeatLostCount = 0
-				bot.Conn.Close()
+				err := bot.Conn.Close()
+				if err != nil {
+					bot.log.Error("[EasyBot] 断开连接失败: ", err)
+				}
 				return
 			}
 			bot.log.Error("[EasyBot] 心跳超时#", bot.HeartbeatLostCount)
@@ -1722,10 +1779,10 @@ func (bot *CQBot) newApiCalling(action, echo string) *CQPost {
 	}
 }
 
-// 调用API
+// CallApi 调用api
 func (bot *CQBot) CallApi(post *CQPost) (err error) {
 	if post.Raw["echo"] == "" {
-		bot.log.Error("[EasyBot] 需要向 CallApi() 传入 echo")
+		bot.log.Error("[EasyBot] post.Raw[\"echo\"] 不可为空")
 		err = e.needEcho
 		return
 	}
@@ -1768,7 +1825,7 @@ func (bot *CQBot) CallApi(post *CQPost) (err error) {
 	return
 }
 
-// 调用API并监听echo
+// CallApiAndListenEcho 调用api并监听echo
 func (bot *CQBot) CallApiAndListenEcho(post *CQPost, echo string) (resp *CQApiResp, err error) {
 	if err = bot.CallApi(post); err != nil {
 		return nil, err
@@ -1779,32 +1836,34 @@ func (bot *CQBot) CallApiAndListenEcho(post *CQPost, echo string) (resp *CQApiRe
 	return
 }
 
+// FetchPrivateMsg 通过QQ号和消息ID获取私聊消息
 // 优先从内存中读取缓存的私聊消息, 没有时调取/get_msg api
-func (bot *CQBot) FetchPrivateMsg(user_id, message_id int) (msg *CQMessage, err error) {
+func (bot *CQBot) FetchPrivateMsg(userId, messageId int) (msg *CQMessage, err error) {
 	bot.MTPMutex.Lock()
 	defer bot.MTPMutex.Unlock()
-	table := bot.MessageTablePrivate[user_id]
+	table := bot.MessageTablePrivate[userId]
 	if table != nil {
-		msg = table[message_id]
+		msg = table[messageId]
 		if msg != nil {
 			return msg, nil
 		}
 	}
-	return bot.GetMsg(message_id)
+	return bot.GetMsg(messageId)
 }
 
+// FetchGroupMsg 通过群号和消息ID获取群聊消息
 // 优先从内存中读取缓存的群消息, 没有时调取/get_msg api
-func (bot *CQBot) FetchGroupMsg(group_id, message_id int) (msg *CQMessage, err error) {
+func (bot *CQBot) FetchGroupMsg(groupId, messageId int) (msg *CQMessage, err error) {
 	bot.MTGMutex.Lock()
 	defer bot.MTGMutex.Unlock()
-	table := bot.MessageTableGroup[group_id]
+	table := bot.MessageTableGroup[groupId]
 	if table != nil {
-		msg = table[message_id]
+		msg = table[messageId]
 		if msg != nil {
 			return msg, nil
 		}
 	}
-	return bot.GetMsg(message_id)
+	return bot.GetMsg(messageId)
 }
 
 type loginInfo struct {
@@ -1812,8 +1871,8 @@ type loginInfo struct {
 	NickName string `json:"nickname"`
 }
 
-// 获取登录号信息
-func (bot *CQBot) GetLoginInfo() (user_id int, nickname string, err error) {
+// GetLoginInfo 获取登录号信息
+func (bot *CQBot) GetLoginInfo() (userId int, nickname string, err error) {
 	action := "get_login_info"
 	echo := genEcho(action)
 	p := bot.newApiCalling(action, echo)
@@ -1824,35 +1883,36 @@ func (bot *CQBot) GetLoginInfo() (user_id int, nickname string, err error) {
 	}
 	respByte, err := json.Marshal(resp.Data)
 	if err != nil {
-		bot.log.Warn("[EasyBot] 序列化出错(json.Marshal(resp.Data)), err: ", err,
+		bot.log.Warn(
+			"[EasyBot] 序列化出错(json.Marshal(resp.Data)), err: ", err,
 			"\n    resp.Data: ", resp.Data,
-			"\n    Marshal by gson: ", gson.New(resp.Data).JSON("", ""))
+			"\n    Marshal by gson: ", gson.New(resp.Data).JSON("", ""),
+		)
 		return 0, "", err
 	}
 	loginInfo := &loginInfo{}
 	err = json.Unmarshal(respByte, loginInfo)
 	if err != nil {
-		bot.log.Warn("[EasyBot] 反序列化出错(json.Unmarshal(respByte, loginInfo)), err: ", err,
+		bot.log.Warn(
+			"[EasyBot] 反序列化出错(json.Unmarshal(respByte, loginInfo)), err: ", err,
 			"\n    respByte: ", string(respByte),
-			"\n    Unmarshal by gson: ", gson.New(respByte).JSON("", ""))
+			"\n    Unmarshal by gson: ", gson.New(respByte).JSON("", ""),
+		)
 		return 0, "", err
 	}
 
 	return loginInfo.UserID, loginInfo.NickName, nil
 }
 
-/*
-从gocq获取消息
-
-需要注意: 通过此api调用返回的消息, 只存在"message"字段, 不存在raw_message字段, 可以再过一遍GetRawMessageOrMessage()
-*/
-func (bot *CQBot) GetMsg(message_id int) (msg *CQMessage, err error) {
+// GetMsg 调用api从gocq获取消息
+// 注意: 通过此api调用返回的消息, 只存在"message"字段, 不存在raw_message字段, 可以再过一遍GetRawMessageOrMessage()
+func (bot *CQBot) GetMsg(messageId int) (msg *CQMessage, err error) {
 	action := "get_msg"
 	echo := genEcho(action)
 	p := bot.newApiCalling(action, echo)
 
 	params := map[string]any{
-		"message_id": message_id,
+		"message_id": messageId,
 	}
 	p.Raw["params"] = params
 
@@ -1862,17 +1922,21 @@ func (bot *CQBot) GetMsg(message_id int) (msg *CQMessage, err error) {
 	}
 	respByte, err := json.Marshal(resp.Data)
 	if err != nil {
-		bot.log.Warn("[EasyBot] 序列化出错(json.Marshal(resp.Data)), err: ", err,
+		bot.log.Warn(
+			"[EasyBot] 序列化出错(json.Marshal(resp.Data)), err: ", err,
 			"\n    resp.Data: ", resp.Data,
-			"\n    Marshal by gson: ", gson.New(resp.Data).JSON("", ""))
+			"\n    Marshal by gson: ", gson.New(resp.Data).JSON("", ""),
+		)
 		return nil, err
 	}
 	msg = &CQMessage{}
 	err = json.Unmarshal(respByte, msg)
 	if err != nil {
-		bot.log.Warn("[EasyBot] 反序列化出错(json.Unmarshal(respByte, msg)), err: ", err,
+		bot.log.Warn(
+			"[EasyBot] 反序列化出错(json.Unmarshal(respByte, msg)), err: ", err,
 			"\n    respByte: ", string(respByte),
-			"\n    Unmarshal by gson: ", gson.New(respByte).JSON("", ""))
+			"\n    Unmarshal by gson: ", gson.New(respByte).JSON("", ""),
+		)
 		return nil, err
 	}
 	return
@@ -1882,24 +1946,20 @@ type downloadFile struct {
 	File string `json:"file"`
 }
 
-func toStringArrHeaders(origin map[string]string) (to []string) {
+func mapToStringsHeaders(origin map[string]string) (to []string) {
 	for k, v := range origin {
 		to = append(to, fmt.Sprint(k+"="+v))
 	}
 	return to
 }
 
-/*
-下载文件到gocq本地, 返回的路径可直接塞进CQ码里发送
-
-headers 可以为 []string 或 map[string]string
-
-(最终都会转为 json 数组)
-*/
-func (bot *CQBot) DownloadFile(url string, thread_count int, headers any) (path string, err error) {
+// DownloadFile 下载文件到gocq本地, 返回的路径可直接塞进CQ码里发送
+// headers 可以为 []"k=v" 或 map["k"]"v"
+// (最终都会转为 json 数组)
+func (bot *CQBot) DownloadFile(url string, threadCount int, headers any) (path string, err error) {
 	switch v := headers.(type) {
 	case map[string]string:
-		headers = toStringArrHeaders(v)
+		headers = mapToStringsHeaders(v)
 	case []string:
 	default:
 		return "", e.wrongType
@@ -1911,7 +1971,7 @@ func (bot *CQBot) DownloadFile(url string, thread_count int, headers any) (path 
 
 	params := map[string]any{
 		"url":          url,
-		"thread_count": thread_count,
+		"thread_count": threadCount,
 		"headers":      headers,
 	}
 	p.Raw["params"] = params
@@ -1922,38 +1982,40 @@ func (bot *CQBot) DownloadFile(url string, thread_count int, headers any) (path 
 	}
 	respByte, err := json.Marshal(resp.Data)
 	if err != nil {
-		bot.log.Warn("[EasyBot] 序列化出错(json.Marshal(resp.Data)), err: ", err,
+		bot.log.Warn(
+			"[EasyBot] 序列化出错(json.Marshal(resp.Data)), err: ", err,
 			"\n    resp.Data: ", resp.Data,
-			"\n    Marshal by gson: ", gson.New(resp.Data).JSON("", ""))
+			"\n    Marshal by gson: ", gson.New(resp.Data).JSON("", ""),
+		)
 		return "", err
 	}
 	file := &downloadFile{}
 	err = json.Unmarshal(respByte, file)
 	if err != nil {
-		bot.log.Warn("[EasyBot] 反序列化出错(json.Unmarshal(respByte, msg)), err: ", err,
+		bot.log.Warn(
+			"[EasyBot] 反序列化出错(json.Unmarshal(respByte, msg)), err: ", err,
 			"\n    respByte: ", string(respByte),
-			"\n    Unmarshal by gson: ", gson.New(respByte).JSON("", ""))
+			"\n    Unmarshal by gson: ", gson.New(respByte).JSON("", ""),
+		)
 		return "", err
 	}
 	return file.File, nil
 }
 
-/*
-发送私聊消息
-
-otherParams:
-
-0: group_id(int) //主动发起临时会话时的来源群号
-
-1: auto_escape(bool) //不解析CQ码
-*/
-func (bot *CQBot) SendPrivateMsg(user_id int, message any, otherParams ...any) (err error) {
+// SendPrivateMsg 发送私聊消息
+//
+// otherParams:
+//
+// 0: groupId int `json:"group_id"` //主动发起临时会话时的来源群号
+//
+// 1: autoEscape bool `json:"auto_escape"` //不解析CQ码
+func (bot *CQBot) SendPrivateMsg(userId int, message any, otherParams ...any) (err error) {
 	action := "send_private_msg"
 	echo := genEcho(action)
 	p := bot.newApiCalling(action, echo)
 
 	params := map[string]any{
-		"user_id": user_id,
+		"user_id": userId,
 		"message": message,
 	}
 	switch len(otherParams) {
@@ -1964,7 +2026,7 @@ func (bot *CQBot) SendPrivateMsg(user_id int, message any, otherParams ...any) (
 		params["group_id"] = otherParams[0]
 	case 0:
 	default:
-		bot.log.Error("[EasyBot] SendPrivateMsg() 非法的选参数量, 取消执行")
+		bot.log.Error("[EasyBot] SendPrivateMsg() 非法的选参数量")
 		return
 	}
 	p.Raw["params"] = params
@@ -1973,37 +2035,53 @@ func (bot *CQBot) SendPrivateMsg(user_id int, message any, otherParams ...any) (
 	return
 }
 
-// SendPrivateMsg的批量操作, 中途发生错误不会中止
-func (bot *CQBot) SendPrivateMsgs(user_ids []int, message any, otherParams ...any) (err error) {
+// SendPrivateMsgs SendPrivateMsg的并发批量操作, 中途发生错误不会中止
+func (bot *CQBot) SendPrivateMsgs(userIds []int, message any, otherParams ...any) error {
 	errs := make(map[int]error)
-	for i, user_id := range user_ids {
-		go func(i, user_id int) {
-			errs[i] = bot.SendPrivateMsg(user_id, message, otherParams...)
-		}(i, user_id)
+	var wg sync.WaitGroup
+	for i, userId := range userIds {
+		wg.Add(1)
+		go func(i, userId int) {
+			defer wg.Done()
+			err := bot.SendPrivateMsg(userId, message, otherParams...)
+			if err != nil {
+				errs[i] = err
+			}
+		}(i, userId)
 	}
+	wg.Wait()
 	if len(errs) > 0 {
 		for i, err := range errs {
-			bot.log.Error("[", i, "](", user_ids[i], "): ", err)
+			bot.log.Error("[", i, "](", userIds[i], "): ", err)
 		}
 		return e.general
 	}
 	return nil
 }
 
-/*
-发送群聊消息
+// SendPrivateMsgsSafe SendPrivateMsg的同步批量操作, 中途发生错误会直接中止并返回
+func (bot *CQBot) SendPrivateMsgsSafe(userIds []int, message any, otherParams ...any) error {
+	for _, userId := range userIds {
+		err := bot.SendPrivateMsg(userId, message, otherParams...)
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
 
-otherParams:
-
-0: auto_escape(bool) //不解析CQ码
-*/
-func (bot *CQBot) SendGroupMsg(group_id int, message any, otherParams ...any) (err error) {
+// SendGroupMsg 发送群聊消息
+//
+// otherParams:
+//
+// 0: autoEscape bool `json:"auto_escape"` //不解析CQ码
+func (bot *CQBot) SendGroupMsg(groupId int, message any, otherParams ...any) (err error) {
 	action := "send_group_msg"
 	echo := genEcho(action)
 	p := bot.newApiCalling(action, echo)
 
 	params := map[string]any{
-		"group_id": group_id,
+		"group_id": groupId,
 		"message":  message,
 	}
 	switch len(otherParams) {
@@ -2020,26 +2098,38 @@ func (bot *CQBot) SendGroupMsg(group_id int, message any, otherParams ...any) (e
 	return
 }
 
-// SendGroupMsg的批量操作, 中途发生错误不会中止
-func (bot *CQBot) SendGroupMsgs(group_ids []int, message any, otherParams ...any) (err error) {
+// SendGroupMsgs SendGroupMsg的并发批量操作, 中途发生错误不会中止
+func (bot *CQBot) SendGroupMsgs(groupIds []int, message any, otherParams ...any) error {
 	errs := make(map[int]error)
-	for i, group_id := range group_ids {
-		go func(i, group_id int) {
-			errs[i] = bot.SendGroupMsg(group_id, message, otherParams...)
-		}(i, group_id)
+	for i, groupId := range groupIds {
+		go func(i, groupId int) {
+			err := bot.SendGroupMsg(groupId, message, otherParams...)
+			if err != nil {
+				errs[i] = err
+			}
+		}(i, groupId)
 	}
 	if len(errs) > 0 {
 		for i, err := range errs {
-			bot.log.Error("[", i, "](", group_ids[i], "): ", err)
+			bot.log.Error("[", i, "](", groupIds[i], "): ", err)
 		}
 		return e.general
 	}
 	return nil
 }
 
-/*
-直接引用消息合并转发
-*/
+// SendGroupMsgsSafe SendGroupMsg的同步批量操作, 中途发生错误会直接中止并返回
+func (bot *CQBot) SendGroupMsgsSafe(groupIds []int, message any, otherParams ...any) error {
+	for _, groupId := range groupIds {
+		err := bot.SendGroupMsg(groupId, message, otherParams...)
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// NewMsgForwardNode 通过消息id直接引用消息作为消息节点
 func NewMsgForwardNode(msgId any) CQForwardNode {
 	return CQForwardNode{
 		"type": "node",
@@ -2049,17 +2139,25 @@ func NewMsgForwardNode(msgId any) CQForwardNode {
 	}
 }
 
-/*
-创建自定义合并转发消息节点
-
-	type nodeData struct { //标准的gocq合并转发消息节点
-		name    string //消息发送者名字
-		uin     int    //消息发送者头像
-		content string //自定义消息内容
-		time    int64  //秒级时间戳(为0时使用当前时间)
-		seq     int64  //起始消息序号(为0时不上报)
+// NewCustomForwardNodeOSR 创建自定义消息节点_OpenShamrock
+func NewCustomForwardNodeOSR(content string) CQForwardNode {
+	return CQForwardNode{
+		"type": "node",
+		"data": map[string]any{
+			"content": content,
+		},
 	}
-*/
+}
+
+// NewCustomForwardNode 创建自定义消息节点
+//
+//	type nodeData struct { //标准的gocq合并转发消息节点
+//		name    string //消息发送者名字
+//		uin     int    //消息发送者头像
+//		content string //自定义消息内容
+//		time    int64  //秒级时间戳(为0时使用当前时间)
+//		seq     int64  //起始消息序号(为0时不上报)
+//	}
 func NewCustomForwardNode(name string, uin int, content string, timestamp, seq int64) CQForwardNode {
 	if timestamp == 0 {
 		timestamp = time.Now().Unix()
@@ -2079,11 +2177,9 @@ func NewCustomForwardNode(name string, uin int, content string, timestamp, seq i
 	return node
 }
 
-/*
-对合并转发消息追加消息节点
-
-也可以塞个 nil 然后当 NewForwardMsg() 用
-*/
+// AppendForwardMsg 对合并转发消息追加消息节点
+//
+// 也可以塞个 nil 然后当 NewForwardMsg() 用
 func AppendForwardMsg(forwardMsg CQForwardMsg, nodes ...CQForwardNode) CQForwardMsg {
 	for _, node := range nodes {
 		forwardMsg = append(forwardMsg, node)
@@ -2091,46 +2187,44 @@ func AppendForwardMsg(forwardMsg CQForwardMsg, nodes ...CQForwardNode) CQForward
 	return forwardMsg
 }
 
-/*
-合并多个消息节点, 创建合并转发消息
-*/
+// NewForwardMsg 合并多个消息节点, 创建合并转发消息
 func NewForwardMsg(nodes ...CQForwardNode) CQForwardMsg {
 	return AppendForwardMsg(nil, nodes...)
 }
 
-/*
-快速创建合并转发消息
-
-所有 content 沿用同一其他参数
-
-	type nodeData struct { //标准的gocq合并转发消息节点
-		name    string //消息发送者名字
-		uin     int    //消息发送者头像
-		content string //自定义消息内容
-		time    int64  //秒级时间戳(为0时使用当前时间)
-		seq     int64  //起始消息序号(为0时不上报)
-	}
-*/
+// FastNewForwardMsg 快速创建合并转发消息
+//
+// 所有 content 沿用同一其他参数
+//
+//	type nodeData struct { //标准的gocq合并转发消息节点
+//		name    string //消息发送者名字
+//		uin     int    //消息发送者头像
+//		content string //自定义消息内容
+//		time    int64  //秒级时间戳(为0时使用当前时间)
+//		seq     int64  //起始消息序号(为0时不上报)
+//	}
 func FastNewForwardMsg(name string, uin int, timestamp, seq int64, content ...string) CQForwardMsg {
 	var forwardMsg CQForwardMsg
 	if len(content) == 0 {
 		return nil
 	}
 	for _, content_ := range content {
-		forwardMsg = AppendForwardMsg(forwardMsg,
-			NewCustomForwardNode(name, uin, content_, timestamp, seq))
+		forwardMsg = AppendForwardMsg(
+			forwardMsg,
+			NewCustomForwardNode(name, uin, content_, timestamp, seq),
+		)
 	}
 	return forwardMsg
 }
 
-// 发送私聊合并转发消息
-func (bot *CQBot) SendPrivateForwardMsg(user_id int, nodes CQForwardMsg) (err error) {
+// SendPrivateForwardMsg 发送私聊合并转发消息
+func (bot *CQBot) SendPrivateForwardMsg(userId int, nodes CQForwardMsg) (err error) {
 	action := "send_private_forward_msg"
 	echo := genEcho(action)
 	p := bot.newApiCalling(action, echo)
 
 	params := map[string]any{
-		"user_id":  user_id,
+		"user_id":  userId,
 		"messages": nodes,
 	}
 	p.Raw["params"] = params
@@ -2139,31 +2233,31 @@ func (bot *CQBot) SendPrivateForwardMsg(user_id int, nodes CQForwardMsg) (err er
 	return
 }
 
-// SendPrivateForwardMsg的批量操作, 中途发生错误不会中止
-func (bot *CQBot) SendPrivateForwardMsgs(user_ids []int, nodes CQForwardMsg) (err error) {
+// SendPrivateForwardMsgs SendPrivateForwardMsg的批量操作, 中途发生错误不会中止
+func (bot *CQBot) SendPrivateForwardMsgs(userIds []int, nodes CQForwardMsg) (err error) {
 	errs := make(map[int]error)
-	for i, user_id := range user_ids {
-		go func(i, user_id int) {
-			errs[i] = bot.SendPrivateForwardMsg(user_id, nodes)
-		}(i, user_id)
+	for i, userId := range userIds {
+		go func(i, userId int) {
+			errs[i] = bot.SendPrivateForwardMsg(userId, nodes)
+		}(i, userId)
 	}
 	if len(errs) > 0 {
 		for i, err := range errs {
-			bot.log.Error("[", i, "](", user_ids[i], "): ", err)
+			bot.log.Error("[", i, "](", userIds[i], "): ", err)
 		}
 		return e.general
 	}
 	return nil
 }
 
-// 发送群聊合并转发消息
-func (bot *CQBot) SendGroupForwardMsg(group_id int, nodes CQForwardMsg) (err error) {
+// SendGroupForwardMsg 发送群聊合并转发消息
+func (bot *CQBot) SendGroupForwardMsg(groupId int, nodes CQForwardMsg) (err error) {
 	action := "send_group_forward_msg"
 	echo := genEcho(action)
 	p := bot.newApiCalling(action, echo)
 
 	params := map[string]any{
-		"group_id": group_id,
+		"group_id": groupId,
 		"messages": nodes,
 	}
 	p.Raw["params"] = params
@@ -2172,24 +2266,26 @@ func (bot *CQBot) SendGroupForwardMsg(group_id int, nodes CQForwardMsg) (err err
 	return
 }
 
-// SendGroupForwardMsg的批量操作, 中途发生错误不会中止
-func (bot *CQBot) SendGroupForwardMsgs(group_ids []int, nodes CQForwardMsg) (err error) {
+// SendGroupForwardMsgs SendGroupForwardMsg的批量操作, 中途发生错误不会中止
+func (bot *CQBot) SendGroupForwardMsgs(groupIds []int, nodes CQForwardMsg) (err error) {
 	errs := make(map[int]error)
-	for i, group_id := range group_ids {
-		go func(i, group_id int) {
-			errs[i] = bot.SendGroupForwardMsg(group_id, nodes)
-		}(i, group_id)
+	for i, groupId := range groupIds {
+		go func(i, groupId int) {
+			errs[i] = bot.SendGroupForwardMsg(groupId, nodes)
+		}(i, groupId)
 	}
 	if len(errs) > 0 {
 		for i, err := range errs {
-			bot.log.Error("[", i, "](", group_ids[i], "): ", err)
+			bot.log.Error("[", i, "](", groupIds[i], "): ", err)
 		}
 		return e.general
 	}
 	return nil
 }
 
-// 某些途径获取到的消息体可能不存在message_raw字段, 比如/get_msg api
+// GetRawMessageOrMessage raw_message字段非空则返回raw_message，否则返回message字段
+//
+// 通过/get_msg api等途径获取到的消息体可能不存在message_raw字段
 func (ctx *CQMessage) GetRawMessageOrMessage() string {
 	if ctx.RawMessage != "" {
 		return ctx.RawMessage
@@ -2197,54 +2293,44 @@ func (ctx *CQMessage) GetRawMessageOrMessage() string {
 	return fmt.Sprint(ctx.Message)
 }
 
-/*
-	return ctx.GetRawMessageOrMessage() == str
-
-字符串匹配
-*/
+// StringsMatch 字符串匹配
+//
+//	return ctx.GetRawMessageOrMessage() == str
 func (ctx *CQMessage) StringsMatch(str string) bool {
 	return ctx.GetRawMessageOrMessage() == str
 }
 
-/*
-	return regexp.MustCompile(exp).FindAllStringSubmatch(ctx.GetRawMessageOrMessage(), -1)
-
-正则完全匹配
-*/
-func (ctx *CQMessage) RegexpFindAllStringSubmatch(exp string) [][]string {
-	return regexp.MustCompile(exp).FindAllStringSubmatch(ctx.GetRawMessageOrMessage(), -1)
+// RegFindAllStringSubmatch 正则完全匹配
+//
+//	return reg.FindAllStringSubmatch(ctx.GetRawMessageOrMessage(), -1)
+func (ctx *CQMessage) RegFindAllStringSubmatch(reg *regexp.Regexp) [][]string {
+	return reg.FindAllStringSubmatch(ctx.GetRawMessageOrMessage(), -1)
 }
 
-/*
-	return regexp.MustCompile(exp).ReplaceAllString(ctx.GetRawMessageOrMessage(), replaceTo)
-
-正则完全匹配替换
-*/
-func (ctx *CQMessage) RegexpReplaceAll(exp, replaceTo string) string {
-	return regexp.MustCompile(exp).ReplaceAllString(ctx.GetRawMessageOrMessage(), replaceTo)
+// RegReplaceAll 正则完全匹配替换
+//
+//	return reg.ReplaceAllString(ctx.GetRawMessageOrMessage(), replaceTo)
+func (ctx *CQMessage) RegReplaceAll(reg *regexp.Regexp, replaceTo string) string {
+	return reg.ReplaceAllString(ctx.GetRawMessageOrMessage(), replaceTo)
 }
 
-/*
-	return strings.Contains(ctx.GetRawMessageOrMessage(), substr)
-
-字符串包含
-*/
+// StringsContains 字符串包含
+//
+//	return strings.Contains(ctx.GetRawMessageOrMessage(), substr)
 func (ctx *CQMessage) StringsContains(substr string) bool {
 	return strings.Contains(ctx.GetRawMessageOrMessage(), substr)
 }
 
-/*
-	return strings.Replace(ctx.GetRawMessageOrMessage())
-
-字符串替换
-*/
+// StringsReplace 字符串替换
+//
+//	return replacer.Replace(ctx.GetRawMessageOrMessage())
 func (ctx *CQMessage) StringsReplace(replacer *strings.Replacer) string {
 	return replacer.Replace(ctx.GetRawMessageOrMessage())
 }
 
-// 匹配超级用户
+// IsSU 是否来自超级用户
 func (ctx *CQMessage) IsSU() bool {
-	for _, su := range ctx.Bot.superUsers {
+	for _, su := range ctx.Bot.SuperUsers {
 		if ctx.UserID == su {
 			return true
 		}
@@ -2252,40 +2338,32 @@ func (ctx *CQMessage) IsSU() bool {
 	return false
 }
 
-/*
-	return ctx.MessageType == "group"
-
-匹配消息来源
-*/
+// IsGroup 是否来自群聊
+//
+//	return ctx.MessageType == "group"
 func (ctx *CQMessage) IsGroup() bool {
 	return ctx.MessageType == "group"
 }
 
-/*
-	return ctx.MessageType == "private"
-
-匹配消息来源
-*/
+// IsPrivate 是否来自私聊
+//
+//	return ctx.MessageType == "private"
 func (ctx *CQMessage) IsPrivate() bool {
 	return ctx.MessageType == "private"
 }
 
-/*
-	return ctx.IsPrivate() && ctx.IsSU()
-
-匹配消息来源
-*/
+// IsPrivateSU 是否来自超级用户私聊
+//
+//	return ctx.IsPrivate() && ctx.IsSU()
 func (ctx *CQMessage) IsPrivateSU() bool {
 	return ctx.IsPrivate() && ctx.IsSU()
 }
 
-/*
-替换消息中的机器人名字
-
-new: 要替换为的字符串
-
-n: 替换次数
-*/
+// ReplaceNickName 替换消息中的机器人名字
+//
+// new: 要替换为的字符串
+//
+// n: 替换次数
 func (ctx *CQMessage) ReplaceNickName(new string, n int) *CQMessage {
 	for _, nm := range ctx.Bot.NickName {
 		ctx.RawMessage = strings.Replace(ctx.GetRawMessageOrMessage(), nm, new, n)
@@ -2293,22 +2371,20 @@ func (ctx *CQMessage) ReplaceNickName(new string, n int) *CQMessage {
 	return ctx
 }
 
-/*
-是否提及了Bot ( 回复、at、bot别名、私聊 )
-
-bot别名可能会导致
-*/
+// IsToMe 是否提及了Bot ( 回复、at、bot别名、私聊 )
+//
+// bot别名可能会导致......?
 func (ctx *CQMessage) IsToMe() bool {
 	isReplyMe := func() bool {
 		replyMsg, err := ctx.GetReplyedMsg()
 		if err != nil {
 			return false
 		}
-		return replyMsg.UserID == ctx.Bot.selfID
+		return replyMsg.UserID == ctx.Bot.SelfID
 	}()
 
 	isAtMe := func() bool {
-		match := ctx.RegexpFindAllStringSubmatch(fmt.Sprintf(`\[CQ:at,qq=%d]`, ctx.Bot.selfID))
+		match := ctx.RegFindAllStringSubmatch(regexp.MustCompile(fmt.Sprintf(`\[CQ:at,qq=%d]`, ctx.Bot.SelfID)))
 		return len(match) > 0
 	}()
 
@@ -2324,16 +2400,14 @@ func (ctx *CQMessage) IsToMe() bool {
 	return isReplyMe || isAtMe || isCallMe || ctx.IsPrivate() //私聊永远都是
 }
 
-/*
-	return ctx.IsJsonMsg() || ctx.IsXmlMsg()
-
-是否为卡片消息
-*/
+// IsCardMsg 是否为卡片消息
+//
+//	return ctx.IsJsonMsg() || ctx.IsXmlMsg()
 func (ctx *CQMessage) IsCardMsg() bool {
 	return ctx.IsJsonMsg() || ctx.IsXmlMsg()
 }
 
-// 是否为json卡片消息
+// IsJsonMsg 是否为json卡片消息
 func (ctx *CQMessage) IsJsonMsg() bool {
 	msg := ctx.GetRawMessageOrMessage()
 	if len(msg) < 8 {
@@ -2342,7 +2416,7 @@ func (ctx *CQMessage) IsJsonMsg() bool {
 	return msg[1:8] == "CQ:json"
 }
 
-// 是否为xml卡片消息
+// IsXmlMsg 是否为xml卡片消息
 func (ctx *CQMessage) IsXmlMsg() bool {
 	msg := ctx.GetRawMessageOrMessage()
 	if len(msg) < 7 {
@@ -2351,17 +2425,17 @@ func (ctx *CQMessage) IsXmlMsg() bool {
 	return msg[1:7] == "CQ:xml"
 }
 
-// 群名片为空则返回昵称
+// GetCardOrNickname 群名片为空则返回昵称
 func (ctx *CQMessage) GetCardOrNickname() string {
-	if ctx.Sender.CardName != "" {
+	if strings.TrimSpace(ctx.Sender.CardName) != "" {
 		return ctx.Sender.CardName
 	}
 	return ctx.Sender.NickName
 }
 
-// 获取回复的消息
+// GetReplyedMsg 获取回复的消息
 func (ctx *CQMessage) GetReplyedMsg() (replyedMsg *CQMessage, err error) {
-	matches := ctx.RegexpFindAllStringSubmatch(`\[CQ:reply,id=(-?[0-9]*)]`)
+	matches := ctx.RegFindAllStringSubmatch(regexp.MustCompile(`\[CQ:reply,id=(-?[0-9]*)]`))
 	if len(matches) == 0 {
 		return nil, errors.New("NO REPLY MESSAGE")
 	}
@@ -2376,7 +2450,7 @@ func (ctx *CQMessage) GetReplyedMsg() (replyedMsg *CQMessage, err error) {
 	}
 }
 
-// 上下文发送消息
+// SendMsg 根据上下文发送消息
 func (ctx *CQMessage) SendMsg(message ...any) (err error) {
 	switch ctx.MessageType {
 	case "private":
@@ -2388,12 +2462,12 @@ func (ctx *CQMessage) SendMsg(message ...any) (err error) {
 	}
 }
 
-// 上下文回复消息
+// SendMsgReply 根据上下文发送回复消息
 func (ctx *CQMessage) SendMsgReply(message ...any) (err error) {
 	return ctx.SendMsg(ctx.Bot.Utils.Format.Reply(ctx.MessageID), fmt.Sprint(message...))
 }
 
-// 上下文发送合并转发消息
+// SendForwardMsg 根据上下文发送合并转发消息
 func (ctx *CQMessage) SendForwardMsg(nodes CQForwardMsg) (err error) {
 	switch ctx.MessageType {
 	case "private":
@@ -2405,13 +2479,13 @@ func (ctx *CQMessage) SendForwardMsg(nodes CQForwardMsg) (err error) {
 	}
 }
 
-// 对RawMessage进行反转义, 没有的话从Message取
+// Unescape 对raw_message进行反转义, 没有的话从message取
 func (ctx *CQMessage) Unescape() *CQMessage {
 	ctx.RawMessage = unescape.Replace(ctx.GetRawMessageOrMessage())
 	return ctx
 }
 
-// 清理多余的空格、换行
+// TrimSpace 清理两侧的空格、换行
 func (ctx *CQMessage) TrimSpace() *CQMessage {
 	ctx.RawMessage = strings.TrimSpace(ctx.GetRawMessageOrMessage())
 	return ctx
@@ -2440,7 +2514,7 @@ func (f *formater) CustomReply(text string, qq int, timestamp int, seq int) stri
 		text = "<内部错误：未指定自定义回复内容>"
 	}
 	if qq == 0 {
-		qq = f.utils.bot.selfID
+		qq = f.utils.bot.SelfID
 	}
 	if timestamp == 0 {
 		timestamp = int(time.Now().Unix())
@@ -2480,7 +2554,7 @@ func (f *formater) Image(data []byte) string {
 
 // fmt.Sprintf("[CQ:video,file=%s]", path)
 func (f *formater) Video(path string) string {
-	return fmt.Sprintf("[CQ:video,file=%s,cover=/root/Miuzarte/go-cqhttp/data/0.00.jpeg]", path)
+	return fmt.Sprintf("[CQ:video,file=%s]", path)
 }
 
 /*
